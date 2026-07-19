@@ -1,0 +1,19 @@
+[package]
+name = "zkc-prove"
+version = "0.1.0"
+edition = "2021"
+description = "Borrowed proving backend: feeds lowered R1CS to arkworks Groth16 over BN254."
+
+[[bin]]
+name = "zkc-prove"
+path = "src/bin/zkc-prove.rs"
+
+[dependencies]
+zkc-core = { path = "../zkc-core" }
+ark-bn254 = "0.4"
+ark-ff = "0.4"
+ark-groth16 = "0.4"
+ark-relations = "0.4"
+ark-snark = "0.4"
+ark-std = "0.4"
+serde_json = "1.0"
