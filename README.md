@@ -1,146 +1,214 @@
-# zkc — phase 1: the walking skeleton
+# zkc — a zero-knowledge circuit compiler
 
-A zero-knowledge circuit compiler built from scratch: **Haskell frontend,
-Rust backend**. Phase 1 is the walking skeleton — a thin but *complete* path
-from a source file to a verified proof, so that every later phase has
-somewhere to land.
+**Phase 2: the type system.** A compiler that refuses to compile
+under-constrained circuits, and tells you why.
+
+Written from scratch: own language, own IR, own analyses. Haskell frontend,
+Rust backend. No circuit-compiler framework is being wrapped — the only
+borrowed component is the Groth16 prover itself (arkworks), which phase 5
+replaces with an own FRI-based prover.
+
+## The problem this phase solves
+
+The dominant class of vulnerability in production ZK circuits is not a broken
+proof system. It is an **under-constrained circuit**: the prover is given a
+degree of freedom the author did not notice, and can produce a cryptographically
+valid proof of a false statement. The proof system is doing its job perfectly —
+it is faithfully proving a claim that does not mean what the author thought.
+
+Phase 0 of this project demonstrated the attack end to end: a valid Groth16
+proof that `5 == 0`. Phase 1 built a working compiler that would happily
+produce exactly that circuit.
+
+Phase 2 makes it a compile error.
 
 ```
-.zkc source ──▶ lexer ──▶ parser ──▶ elaborate ──▶ Core IR ──▶ passes ──▶ JSON
-                                    ( Haskell )                              │
-                                                                             ▼
-        proof ◀── Groth16 ◀── R1CS ◀── lower ◀── validate ◀── Core IR ── (Rust)
-                                 ▲
-                          witness solver
+$ zkc build examples/iszero_broken.zkc
+error: output 'out' is not determined by the circuit's inputs
+  --> examples/iszero_broken.zkc:14
+      |
+   14 |     output out: field;
+      |
+     = under the assumption x != 0, the constraints admit more than one value of 'out'
+     = the prover also chooses the advice value 'inv' freely
+     = so two witnesses can agree on every input and still disagree on 'out' —
+       the prover picks which one to prove
+help: add a constraint that forces 'out' in this case, then recompile
 ```
+
+The compiler did not pattern-match a known bug. It *proved* that the correct
+`IsZero` gadget is sound, tried to prove the same about this one, and reports
+the branch where the proof fails.
+
+## Quick start
 
 ```bash
-./scripts/run_all.sh      # build both halves, run both test suites, walk the pipeline
+make -C compiler all && make -C compiler test     # 54 checks
+cd backend && cargo test && cargo build --release # 19 tests
+./scripts/run_all.sh                              # the whole story
 ```
 
-Requires GHC (tested on 9.4.7) and Rust (tested on 1.75). The compiler uses
-**only GHC's boot libraries** — no cabal, no Hackage, `make` and go.
+Requires GHC (≥ 9.4) and Rust (≥ 1.75). The compiler uses only GHC boot
+libraries — no Hackage packages, no Stack, no Cabal.
 
-## What phase 1 delivers
+## The language
 
-**A real language, however small.** Three statement forms, and the one that
-matters is the distinction the whole project exists for:
-
-```rust
+```
 circuit IsZero {
     private x: field;
-    public out: field;
+    output out: field;
 
-    advice inv = inv_or_zero(x);      // computed, NOT constrained
+    gadget is_zero {
+        advice inv = inv_or_zero(x);
 
-    assert x * inv == 1 - out;
-    assert x * out == 0;
+        assert x * inv == 1 - out;
+        assert x * out == 0;
+    }
 }
 ```
 
-`let` computes *and* constrains. `advice` computes *without* constraining —
-the "unsafe" of ZK. A prover is free to substitute any value it likes for an
-advice wire; only assertions pin it down.
+Three ideas carry the phase.
 
-**An arithmetization-agnostic Core IR** (`ir-spec/SCHEMA.md`). A typed
-constraint graph — field operations, hints, assertions — that says nothing
-about R1CS. That neutrality is the point: phase 5's hand-written FRI prover
-consumes AIR traces, which are structurally unlike R1CS equation systems, and
-an IR shaped like either could not lower to the other.
+### 1. `output` is not `public`
 
-**Real optimization passes**: constant folding, CSE, dead-code elimination,
-with wire renumbering. `--no-opt` turns them off so you can diff the IR.
-
-**A backend that checks its input.** The IR is validated on load (dense wires,
-topological order, arity, schema version) rather than trusted. A frontend bug
-that reordered nodes would otherwise miscompile silently — and here a
-miscompiled circuit is a security hole.
-
-**Source-level errors from the backend.** Assertions carry their original text
-and line number through the IR, so a violated constraint reads:
+Phase 1 had `private` and `public`, and that turned out to make the central
+question ill-posed. "Is this value determined?" only has an answer once you
+know whether the circuit is meant to *compute* it.
 
 ```
-constraint system NOT satisfied — refusing to prove:
-  [3] line 18: (x * out) == 0
-      left-hand side = 5, right-hand side = 0
+circuit Relation {
+    public a: field;
+    public b: field;
+    assert a * b == 12;
+}
 ```
 
-## The demo, and the point of it
+This is a perfectly sound "I know a factorisation of 12" statement. Neither
+`a` nor `b` is determined, and neither should be — `(2,6)` and `(3,4)` are
+both legitimate witnesses. A checker demanding determinacy here would be
+wrong.
 
-`scripts/run_all.sh` ends with two runs that differ by **one line of source**:
+So the language separates the roles: `private` and `public` are **inputs**
+(the prover supplies them; nothing is claimed about where they came from),
+while `output` is a value the circuit **computes** — and carries a proof
+obligation. `Relation` compiles with "nothing to prove"; `IsZero` compiles
+with a two-case proof.
 
-- `examples/iszero.zkc` — a forged claim ("5 is zero", with the advice wire
-  overridden) is caught by the self-check and refused, naming the assertion.
-- `examples/iszero_broken.zkc` — the same forged claim yields a
-  **cryptographically valid Groth16 proof that 5 == 0**, and the verifier
-  accepts it.
+### 2. `advice` is quarantined
 
-Nothing is wrong with the proof system. The constraint system simply never
-asked the question. This is the bug class the project exists to eliminate,
-now reproducible from source through the real compiler rather than a
-hand-written spike.
+`let` computes *and* constrains, so ordinary circuit code cannot create an
+unconstrained value at all. `advice` computes *without* constraining — it is
+the one construct that can silently make a circuit unsound.
 
-## The known gap (and why it is on purpose)
+It is therefore only legal inside a `gadget` block. Writing it becomes a
+deliberate, greppable act rather than something that slips in during a
+refactor. The block is the author saying: *I know this is subtle, and I claim
+the assertions here pin the outputs down anyway.*
 
-Phase 1's determinacy check is a deliberate approximation: every advice wire
-must be *mentioned* by some assertion. That catches the crudest error —
-`examples/unconstrained_advice.zkc` is rejected — and nothing subtler.
+The determinacy pass then checks that claim.
 
-`iszero_broken.zkc` passes every check phase 1 has and is still forgeable.
-That gap is the specification for **phase 2**: `Determined` vs `Advice` as
-real types, `hint` quarantined inside `gadget` blocks, and a determinacy pass
-that must *prove* the assertions pin each advice wire down uniquely (a
-decidable syntactic fragment first, SMT escalation later).
+### 3. Determinacy is proved, not assumed
+
+Each assertion becomes a polynomial equation `P = 0` over the circuit's atoms
+(declared wires and advice wires). Two rules are applied to exhaustion:
+
+- **Linear propagation.** If an equation reads `c * u + r = 0` where `u` is
+  the only undetermined atom and `c`, `r` are computable from determined
+  atoms, and `c` is known nonzero, then `u = -r/c` is determined. Fields have
+  no zero divisors, so a product of nonzero values is nonzero — that is what
+  makes `c` checkable.
+- **Case splitting.** When propagation stalls, branch on `w = 0` versus
+  `w != 0` for some determined atom `w`. In the zero branch every monomial
+  containing `w` vanishes; in the nonzero branch `w` unblocks coefficients.
+  If *both* branches determine the outputs, so does the circuit.
+
+Neither rule alone can verify `IsZero`. The proof needs the split:
+
+```
+$ zkc build examples/iszero.zkc --explain
+  determinacy: 1 output(s) proved determined (out), 2 case(s)
+    case x == 0      # x*inv == 1-out collapses to 0 == 1-out, so out = 1
+    case x != 0      # x*out == 0 with x invertible, so out = 0
+```
+
+A branch whose equations reduce to a nonzero constant is *infeasible* — no
+witness exists there — and counts as discharged. That is how `Divide` works:
+
+```
+$ zkc build examples/divide.zkc --explain
+  determinacy: 1 output(s) proved determined (q), 2 case(s)
+    case b == 0      # b * inv_b == 1 becomes 0 == 1: no witness exists
+    case b != 0      # inv_b determined, then q determined through it
+```
+
+Note what is **not** required: advice wires need not be determined. When
+`x = 0`, `IsZero`'s helper `inv` genuinely may be anything, and the circuit is
+still sound because `out` is pinned regardless. A checker that demanded every
+advice wire be determined would reject correct code. Soundness is about
+outputs.
+
+## Soundness travels with the artifact
+
+The emitted IR (schema v2) carries the proof:
+
+```json
+"determinacy": {
+  "proved": true,
+  "targets": ["out"],
+  "branches": [["x == 0"], ["x != 0"]]
+}
+```
+
+The Rust backend **refuses to prove** an IR that declares outputs without a
+discharged proof, and a missing record deserializes to `proved: false` rather
+than defaulting to allow. Soundness is a claim about *this circuit*, not about
+the toolchain that happened to produce it — so it is checked at the point of
+use, not asserted in a README.
+
+## What it does not do
+
+The analysis is **incomplete, and deliberately conservative**: a failure means
+"not proved", not "proved unsound". Since the pass rejects on failure,
+incompleteness costs expressiveness — never safety.
+
+Concretely:
+
+- Case splitting is depth-bounded (3). Deeper proofs are refused, not guessed.
+- Polynomial expansion is exponential in the worst case, with a hard cap and a
+  clear error rather than a hang.
+- Degree ≥ 2 in the unknown is never solved: `z * z == 4` has two roots, so
+  `z` is correctly reported as undetermined.
+- Gadgets are quarantine markers, not scopes or reusable definitions yet.
+
+Phase 3 addresses the first two by escalating to an SMT solver when the
+decidable fragment gives up, and the last by making gadgets parameterised
+definitions.
 
 ## Layout
 
 ```
-zkc/
-├── compiler/              # Haskell — GHC boot libraries only
-│   ├── src/Zkc/Syntax/    #   Lexer, Parser, Ast
-│   ├── src/Zkc/Core/      #   Ir, Elaborate (scope + kind checks), Passes
-│   ├── src/Zkc/Emit/      #   Json (hand-rolled)
-│   ├── src/Main.hs        #   `zkc build file.zkc -o out.json`
-│   ├── test/Spec.hs       #   27 checks, hand-rolled harness
-│   └── Makefile
-├── ir-spec/SCHEMA.md      # the Haskell/Rust contract, versioned
-├── backend/
-│   ├── zkc-core/          # IR loading + validation, witness solver,
-│   │                      #   R1CS lowering, satisfiability checker.
-│   │                      #   Generic over the field, no cryptography.
-│   └── zkc-prove/         # arkworks Groth16 over BN254 + the CLI
-├── examples/*.zkc         # incl. one deliberately vulnerable, one rejected
-├── inputs/*.json          # prover inputs, incl. the forgery
-├── scripts/run_all.sh
-└── docs/
+compiler/                 Haskell frontend (GHC boot libraries only)
+  src/Zkc/Syntax/         lexer, parser, AST
+  src/Zkc/Core/           elaboration, Core IR, optimizer
+  src/Zkc/Analysis/       Poly.hs (multivariate polys over F_p)
+                          Determinacy.hs (the proof search)
+  src/Zkc/Diagnostics.hs  source-quoting error messages
+  src/Zkc/Field.hs        field moduli
+  test/Spec.hs            54 checks, hand-rolled harness
+backend/                  Rust
+  zkc-core/               IR loading + validation, witness solver,
+                          R1CS lowering and checker
+  zkc-prove/              arkworks Groth16 bridge + CLI
+examples/                 .zkc circuits, including two that must NOT compile
+ir-spec/SCHEMA.md         the Haskell/Rust contract, versioned
+docs/                     design decisions and roadmap
 ```
 
-## Tests
+## Notes on the environment
 
-- `make -C compiler test` — 27 checks: lexing, parsing, error messages,
-  scope/kind rules, each optimizer pass, JSON emission.
-- `cargo test --manifest-path backend/Cargo.toml` — 17 checks: field parsing,
-  every IR validation rule, lowering cost model, and the forgery behaviour on
-  both circuits.
-
-The backend tests use hand-written IR fixtures rather than compiler output, on
-purpose: they pin the *contract*, so they fail if the backend's reading of the
-schema drifts even when the frontend drifts with it. End-to-end agreement is
-covered by `scripts/run_all.sh`.
-
-## Notes
-
-- `Cargo.lock` is committed and pins `zeroize` and `rayon-core` to releases
-  that build on Rust 1.75. On a newer toolchain you can drop those pins.
-- Groth16 setup uses a deterministic RNG so runs are reproducible. A real
-  deployment needs a multi-party trusted setup — whoever knows that randomness
-  can forge proofs for any statement.
-- The compiler avoids Hackage entirely (boot libraries only). If you would
-  rather use `megaparsec`/`aeson`, the module boundaries are already in the
-  right places.
-
-## Next
-
-Phase 2 — the type system: `Determined`/`Advice` in the IR, `gadget`
-quarantine, the determinacy pass, and first-class error messages. See
-`docs/ROADMAP.md`.
+- The compiler depends on **nothing** outside GHC's boot libraries — lexer,
+  parser and JSON writer are hand-rolled. `make all` is the whole build.
+- `rust-toolchain.toml` pins 1.75.0 and `Cargo.lock` pins four transitive
+  dependencies to their last 1.75-compatible releases (`zeroize`,
+  `zeroize_derive`, `rayon`, `rayon-core`). On a modern toolchain both pins
+  can simply be deleted.
