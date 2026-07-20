@@ -1,0 +1,3 @@
+{ "comment": "The attack: claim 5 is zero. The prover ignores the hint and picks inv = (1 - out)/x = 0, which satisfies assertion (1). Only assertion (2) stops it.",
+  "inputs": { "x": "5", "out": "1" },
+  "advice": { "inv": "0" } }

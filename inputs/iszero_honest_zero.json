@@ -1,0 +1,2 @@
+{ "comment": "x = 0, so the honest answer is out = 1",
+  "inputs": { "x": "0", "out": "1" } }
