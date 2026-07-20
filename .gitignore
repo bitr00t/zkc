@@ -1,3 +1,5 @@
 compiler/build/
 backend/target/
 build/
+*.o
+*.hi
