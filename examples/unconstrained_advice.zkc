@@ -1,0 +1,11 @@
+// Rejected by the compiler: `ghost` is computed by a hint but no assertion
+// ever mentions it, so nothing determines its value. This is the crudest
+// form of under-constraining, and the one phase 1 already catches.
+circuit UnconstrainedAdvice {
+    private x: field;
+    public out: field;
+
+    advice ghost = inv_or_zero(x);
+
+    assert out == x * x;
+}

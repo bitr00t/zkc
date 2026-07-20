@@ -1,0 +1,19 @@
+// out = 1 if x == 0, else 0.  The classic ZK gadget.
+//
+// `inv` cannot be computed by the constraint system, only *guessed* by the
+// prover and then pinned down. That is what `advice` marks: a value the
+// witness generator produces which no constraint yet determines.
+//
+// Both assertions are required:
+//   (1) forces out = 0 whenever x != 0 (given a well-chosen inv)
+//   (2) forces out = 0 whenever x != 0 for ANY inv the prover picks
+// Drop (2) and the circuit becomes forgeable — see iszero_broken.zkc.
+circuit IsZero {
+    private x: field;
+    public out: field;
+
+    advice inv = inv_or_zero(x);
+
+    assert x * inv == 1 - out;
+    assert x * out == 0;
+}
