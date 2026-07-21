@@ -1,63 +1,43 @@
 # Roadmap
 
-## Invariants every phase must preserve
+A from-scratch zero-knowledge circuit compiler: own language, own
+arithmetization, own prover.
 
-1. **The Core IR is arithmetization-agnostic** — a typed constraint graph, not
-   R1CS with sugar, so it can lower to both R1CS and AIR.
-2. **Everything is generic over the field** — BN254 for Groth16, Goldilocks
-   for FRI. The field is a parameter, never a hardcoded modulus.
+Two invariants hold at every phase:
 
-## Phases
+1. **The Core IR is arithmetization-agnostic.** It is a typed constraint
+   graph, not an R1CS in disguise, so it can lower to both R1CS and AIR.
+2. **Everything is generic over the field.** The field is a parameter, never
+   hardcoded — BN254 for Groth16, Goldilocks for the FRI prover later.
 
-- **Phase 0 — foundation & spike.** *(done, see the `zk-phase0` repo)*
-  Hand-rolled field arithmetic, an R1CS satisfiability checker, and the
-  `IsZero` under-constraining lesson through arkworks Groth16.
+| Phase | Content | Status |
+|---|---|---|
+| 0 | Foundation spike: own field arithmetic, R1CS, satisfiability checker, and a working forgery against an under-constrained circuit | **done** |
+| 1 | Walking skeleton: source → typed IR → R1CS → witness → Groth16 proof, end to end | **done** |
+| 2 | The type system: `output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting | **done** |
+| 3 | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | next |
+| 4 | Own arithmetization: Plonkish/AIR lowering from the same Core IR | |
+| 5 | Own prover: FRI over Goldilocks, replacing arkworks | |
+| 6 | Tooling: language server, constraint-count profiler, gadget standard library | |
+| 7 | Recursion and formal verification of the lowering | |
 
-- **Phase 1 — walking skeleton.** *(this repo)* Surface language → typed Core
-  IR → R1CS → witness → Groth16 proof. Minimal type system, real optimizer
-  passes, a versioned IR schema validated on both sides, and the forgery
-  reproduced end to end from source.
+## Phase 3 in detail
 
-- **Phase 2 — the type system (the differentiator).** The reason to build this
-  compiler rather than use Circom:
-  - `Determined<F>` vs `Advice<F>` as real types in the IR, not just a
-    frontend check;
-  - ordinary users get only `<==` (assign *and* constrain), so their code is
-    sound by construction;
-  - raw `hint` is quarantined inside `gadget` blocks, each advice wire
-    carrying a **determinacy proof obligation**: the assertions must pin the
-    value down *uniquely*. Start with a decidable syntactic fragment
-    (recognising the standard patterns like `x * inv == 1 - out` together with
-    `x * out == 0`), escalate to an SMT solver for the rest;
-  - public/private information-flow labels, and automatic range checks.
-  Success criterion: `examples/iszero_broken.zkc` becomes a compile error with
-  a message that explains *which* value is not determined and why.
+**Gadgets become definitions.** Parameterised, reusable, with real scopes and
+call sites. Each instantiation carries its own determinacy obligation, which
+means the proof search must handle obligations compositionally rather than
+re-deriving them per circuit.
 
-- **Phase 3 — real IR & optimizations.** Constraint minimization, better CSE,
-  witness scheduling, multiplication-by-constant folded into linear
-  combinations. Benchmark constraint counts against Circom on SHA-256 and a
-  Merkle path — a number, not a claim.
+**SMT escalation.** When the decidable fragment fails, emit the residual
+question to an SMT solver over the field rather than rejecting outright. The
+decidable core stays the fast path; the solver handles the tail. Crucially the
+compiler must then distinguish three outcomes — proved, refuted (with a
+counterexample: two witnesses agreeing on inputs and disagreeing on an
+output), and unknown — where phase 2 collapses the last two into "rejected".
+A refutation is far more useful than a rejection, because it hands the author
+the exact attack.
 
-- **Phase 4 — own arithmetization.** R1CS → Plonkish (custom gates + lookup
-  arguments), or commit to AIR directly.
-
-- **Phase 5 — own prover.** Field NTT, a commitment scheme, FRI, the
-  polynomial IOP, prover and verifier. FRI/STARK to avoid pairings and a
-  trusted setup: only field and Merkle math, which is safe to implement
-  yourself.
-
-- **Phase 6 — tooling & ecosystem.** LSP, formatter, stdlib (Poseidon, Merkle,
-  ECDSA), Solidity verifier codegen, docs. This is what drives adoption.
-
-- **Phase 7 — stretch.** Recursion / proof composition, a zkVM frontend,
-  formal verification of the lowering passes.
-
-## Immediate next steps for phase 2
-
-1. Put wire kinds into the IR schema (version bump to 2).
-2. Add `gadget` blocks to the grammar; make bare `hint` outside a gadget an
-   error.
-3. Implement the determinacy pass over the decidable fragment, with the
-   `IsZero` pattern as the first recognised template.
-4. Turn `iszero_broken.zkc` into a compile-error test case, and keep a
-   `gadget`-wrapped version that still compiles as the escape hatch.
+**Constraint-count optimization**, benchmarked against Circom on SHA-256 and
+Merkle inclusion. Phase 2's optimizer does constant folding, CSE and dead-code
+elimination; competitive lowering needs linear-combination fusion and
+multiplication-gate packing.

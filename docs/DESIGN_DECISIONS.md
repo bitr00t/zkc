@@ -1,134 +1,117 @@
-# Design decisions
+# Design decisions — phase 2
 
-The choices worth arguing about, and why they went the way they did.
+Decisions worth writing down, with the reasoning that produced them.
 
-## Haskell frontend, Rust backend
+## Splitting `public` into `public` and `output`
 
-Compilers are algebraic-data-type-shaped: ASTs, IRs, pattern matching over
-node kinds, passes as pure functions. Haskell makes that code short and makes
-adding an IR node a type error everywhere it must be handled. Provers are the
-opposite workload — tight loops over field elements, NTTs, Merkle trees, where
-predictable performance and no GC pauses matter. Rust owns that.
+**The problem.** The phase-2 goal was "prove that values are determined". Two
+days of that goal being obviously right hid the fact that it was not yet a
+*question*: determined values are values the circuit computes, and phase 1's
+type system could not say which those were.
 
-The seam is the serialized Core IR. It is a real artifact with a versioned
-schema, validated on both sides, so the two halves can be developed and
-debugged independently.
+`public a; public b; assert a * b == 12;` is a sound circuit. Nothing is
+determined, and nothing should be. Meanwhile `IsZero`'s `out` must be
+determined or the circuit is forgeable. Both used the same keyword.
 
-## The Core IR is arithmetization-agnostic
+**The decision.** A third visibility. `private` and `public` are inputs;
+`output` is computed and carries the proof obligation. Both `public` and
+`output` land in the verifier's public input vector, so nothing changes
+cryptographically — the difference is entirely in what the compiler must
+prove.
 
-The single most consequential decision, and the most expensive to retrofit.
+**Consequence.** The determinacy pass has well-defined targets, and circuits
+that legitimately determine nothing compile without special-casing.
 
-The IR is a typed constraint graph: field operations, hints, assertions. It
-does *not* encode R1CS. R1CS is an unordered system of rank-1 equations over
-one global witness vector; AIR — what a FRI/STARK prover consumes — is an
-execution-trace table with transition constraints between adjacent rows. They
-are structurally different, and an IR shaped like either cannot be lowered to
-the other.
+## Advice need not be determined
 
-The cost model lives in the backend, not the IR. In `lower.rs`, `add`, `sub`
-and `neg` are free (they fold into linear combinations) while `mul` costs a
-variable and a constraint. Under an AIR backend that same arithmetic would
-cost trace columns. Had the IR baked in "linear operations are free", phase 5
-would have meant a rewrite.
+The tempting rule is "every advice wire must be pinned down by some
+constraint". It is wrong, and rejecting correct code is the way it fails.
 
-## Everything is generic over the field
+In `IsZero`, when `x = 0` the helper `inv` may be *anything*: the constraints
+`0 * inv == 1 - out` and `0 * out == 0` say nothing about it. The circuit is
+still perfectly sound, because `out` is forced to 1 regardless. A checker
+demanding determinacy of `inv` would reject the canonical gadget.
 
-R1CS + Groth16 wants a ~254-bit pairing-friendly field (BN254). FRI wants a
-small, high-two-adicity field (Goldilocks, `2^64 - 2^32 + 1`), where a 254-bit
-field would be a performance disaster. So the field is a parameter everywhere:
-the IR names it (`"field": "bn254"`), and `zkc-core` is generic over a
-`ZkField` trait with a blanket impl for arkworks' `PrimeField`. Phase 5's
-hand-rolled field implements the same trait and the rest of the compiler keeps
-working.
+Soundness is about outputs. Advice is a means, not an obligation.
 
-## Borrow the prover, for now
+## Why case splitting, rather than a template library
 
-Phases 1–3 use arkworks' Groth16. Writing a prover is phase 5's whole job; the
-point of a walking skeleton is a *complete* pipeline early, so that later work
-has a place to attach. Confining the dependency to `zkc-prove` keeps it
-swappable — `zkc-core` has no cryptography in it at all.
+The obvious cheap implementation is to recognise known-good patterns —
+`x*inv == 1-out` together with `x*out == 0` is the `IsZero` template — and
+whitelist them. Real tooling does some of this.
 
-## `let` versus `advice`
+It was rejected because it does not generalise: a template library can only
+bless circuits someone already wrote. The zero/nonzero split plus linear
+propagation is a genuine (if small) decision procedure, and it verified
+`Divide` without anyone teaching it about division. That is the difference
+between a checker and a lookup table.
 
-The language has two binding forms because the bug class this project targets
-lives exactly in the gap between them.
+## Reasoning over F_p, not over the integers
 
-`let` computes *and* constrains, so ordinary circuit code is sound by
-construction. `advice` computes *without* constraining: the value is whatever
-the prover supplies. Most ZK vulnerabilities are an advice wire that some
-assertion was supposed to pin down and didn't.
+"Is this coefficient nonzero?" is a question about a specific prime. A
+coefficient can be a nonzero integer and still vanish modulo p. Reasoning over
+`Integer` and hoping would be unsound in exactly the direction that matters.
 
-Making that difference **syntactic** means it can be type-checked. Circom's
-`<--` and `<==` prove the ergonomics work; the plan from phase 2 is to go
-further and require a *proof* of determinacy rather than trusting the author
-to have written enough assertions.
+So the frontend keeps a table of field moduli (`Zkc/Field.hs`) and does its
+polynomial arithmetic in the right field. Naming an unknown field is a clean
+error listing the known ones — not a silent assumption.
 
-## Hints are a closed set
+## Running determinacy *after* optimization
 
-`advice` may only be bound to a known hint (`inv_or_zero`, `inv`), not to an
-arbitrary expression. Every hint is a proof obligation the determinacy pass
-will have to discharge, so the set must be enumerable. It also produces better
-errors today: `advice w = x * x;` is rejected with "that is not a hint" rather
-than a parse error about a missing parenthesis.
+Safe, because every pass preserves the solution set of the constraint system:
+constant folding and CSE change how a value is computed, never which
+assignments satisfy; dead-code elimination only removes nodes no assertion
+depends on. Running on the smaller graph keeps the polynomial expansion
+cheaper, and the test suite pins the invariant by checking both orders agree.
 
-## Advice names survive into the IR
+## Candidate ordering in the proof search
 
-`hint` nodes carry their source-level name. Two reasons: diagnostics should say
-`inv`, not `wire 3`; and the prover CLI can *override* an advice wire by name.
-That override is not a debugging convenience — advice is by definition
-prover-chosen, so modelling a dishonest prover requires being able to say so
-out loud. It is what makes the forgery demo real rather than narrated.
+Splitting on the wrong atom still finds a proof, but a worse one. `Divide`
+needed three branches when candidates were tried in wire order and two when
+*blocking* atoms — those sitting in a coefficient that would otherwise solve
+an equation — are tried first. Since the branch count is exponential in depth,
+ordering is not cosmetic.
 
-## The backend validates the IR instead of trusting it
+## Failure means "not proved", never "proved unsound"
 
-Dense wire numbering, topological order, arity, schema version. A frontend bug
-that emitted a forward reference would otherwise silently miscompile a
-circuit, and here a miscompiled circuit is a security hole. The cost is a few
-dozen lines; the alternative is a class of bug that surfaces as "the verifier
-accepted something it shouldn't have".
+The analysis is incomplete: bounded depth, bounded polynomial size, and no
+handling of degree ≥ 2 in the unknown. It could report failure on a circuit
+that is in fact sound.
 
-## Self-check before proving
+Because the pass **rejects** on failure, that asymmetry is the safe one:
+incompleteness costs expressiveness, not safety. The alternative — accepting
+when unsure — would make the entire pass decorative.
 
-After lowering, the backend evaluates every constraint against the assignment
-itself before calling Groth16. Two payoffs: a violated constraint is reported
-against the user's source line and text, and the failure mode is a clean
-refusal instead of an assertion firing deep inside the proving library.
-(arkworks' prover asserts satisfiability internally and panics — a bad user
-experience to inherit.)
+This is also why the escape hatch is a language feature (`public` instead of
+`output`, stating that a value is an input rather than a computed result)
+rather than a `--trust-me` flag. Stating a weaker claim is honest; suppressing
+a check is not.
 
-## JSON, and constants as strings
+## Soundness inside the artifact
 
-JSON because for the first stretch of a compiler's life, reading the IR in a
-diff and pasting it into a bug report is worth more than serialization speed.
-Constants are decimal *strings* because field elements routinely exceed 64
-bits and JSON numbers cannot carry them safely.
+The IR carries the determinacy proof, and the backend refuses to build a
+proving key for a circuit that declares outputs without one. A missing record
+deserializes to `proved: false`.
 
-Optimizer-folded constants may be negative: folding happens over the integers
-and the backend reduces modulo whichever prime it instantiates. That is what
-keeps constant folding field-agnostic.
+The reasoning: "this circuit is sound" is a claim about the circuit, and
+artifacts get copied, cached, committed and hand-edited. Checking at the point
+of use costs one `if` and closes the gap between what the frontend proved and
+what the backend actually proves.
 
-## Hints are never folded or shared
+## Errors as a deliverable
 
-CSE merges structurally identical nodes — except hints. A hint is an effect
-("ask the witness generator"), and two hint nodes represent two independent
-free choices by the prover. Silently merging them would change which values a
-prover may pick, i.e. change the security properties of the circuit. The
-optimizer must never do that.
+An under-constrained circuit is found by reading, so the compiler's output is
+part of the product. Every diagnostic carries a source line (echoed with a
+gutter), notes explaining the reasoning, and a suggestion. The determinacy
+failure names the output, the branch it stays free in, and the advice the
+prover may still choose — because "not determined" alone would leave the
+author exactly where they started.
 
-## No external Haskell packages
+## Gadgets are markers, not scopes — for now
 
-The compiler builds with GHC's boot libraries only: hand-rolled lexer, parser
-and JSON writer. Partly circumstance (Hackage was unreachable in the build
-environment), partly a real benefit — `make` and go, no package manager in the
-loop, and the whole frontend is auditable. The module boundaries are
-conventional, so swapping in `megaparsec` or `aeson` later is local surgery.
-
-## The phase-1 determinacy check is knowingly too weak
-
-Every advice wire must be *mentioned* by some assertion. It catches the
-crudest error and nothing subtler: `examples/iszero_broken.zkc` passes it and
-is still forgeable.
-
-That is not an oversight left lying around — it is the specification for phase
-2, kept as an executable example so the improvement can be measured rather
-than asserted.
+Phase-2 `gadget` blocks quarantine advice but do not introduce a scope:
+bindings inside remain visible after the block. This is a deliberate
+simplification; making them parameterised, reusable definitions is phase-3
+work, and doing it properly means call sites, instantiation and per-instance
+determinacy obligations. Shipping the quarantine first delivers the safety
+property without pretending the module system exists.
