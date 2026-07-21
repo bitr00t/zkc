@@ -1,120 +1,113 @@
-# Core IR — schema version 1
+# Core IR — schema version 2
 
 The serialized Core IR is the contract between the Haskell frontend and the
-Rust backend. It is versioned, validated on load, and tested from both sides.
+Rust backend. It is versioned, validated on load, and round-tripped by tests
+on both sides.
 
-JSON was chosen over a binary format deliberately. For the first stretch of a
-compiler's life, being able to read the IR in a diff and paste it into a bug
-report is worth far more than serialization speed; the format can tighten once
-the semantics stop moving.
+The IR is deliberately **not** R1CS-shaped. It is a typed constraint graph, so
+the same artifact can be lowered to R1CS today and to a Plonkish or AIR
+arithmetization in phase 4 without the frontend changing.
 
-## Design rule
+## What changed since version 1
 
-**The IR is arithmetization-agnostic.** It describes a typed constraint graph
-— field operations, hints, assertions — and says nothing about R1CS, Plonkish
-gates or AIR traces. Backends decide what a node costs:
-
-| node             | cost in R1CS                       | cost in an AIR backend |
-|------------------|------------------------------------|------------------------|
-| `add`/`sub`/`neg`| free (folded into linear combos)   | usually a trace column |
-| `mul`            | 1 variable + 1 constraint          | a transition constraint|
-| `hint`           | 1 variable, **no constraint**      | 1 unconstrained column |
-
-If the IR encoded either cost model, the other backend could not be written.
+| Addition | Why |
+|---|---|
+| `visibility: "output"` | Version 1 had only `private`/`public`, which conflated "input the verifier sees" with "value the circuit computes". Determinacy is only a well-posed question once those are separate. |
+| `advice_derived` per node | The syntactic taint: does this wire depend on a hint? Distinct from determinacy — a tainted wire may still be uniquely determined. |
+| `gadget` and `line` on hint nodes | Advice is only legal inside a `gadget` block, so every hint has a quarantine region to point at in diagnostics. |
+| `determinacy` record | The frontend's proof, carried inside the artifact. |
+| `line` on inputs | Lets the backend report against source positions. |
 
 ## Top level
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "IsZero",
   "field": "bn254",
   "const_one_wire": 0,
   "inputs": [ ... ],
   "nodes": [ ... ],
-  "assertions": [ ... ]
+  "assertions": [ ... ],
+  "determinacy": { ... }
 }
 ```
 
-| field            | meaning                                                     |
-|------------------|-------------------------------------------------------------|
-| `schema_version` | must be `1`; a backend rejects anything else outright        |
-| `name`           | circuit name, used in diagnostics                            |
-| `field`          | the *named* field, e.g. `bn254`. Never a hardcoded modulus — a FRI backend will read `goldilocks` here |
-| `const_one_wire` | always `0`                                                   |
+`field` names the scalar field. The frontend needs its modulus to decide
+whether a polynomial coefficient is nonzero; the backend instantiates its
+arithmetic over it. Known: `bn254`, `goldilocks`.
 
 ## Wires
 
-Wires are numbered densely and are in SSA form (assigned exactly once):
+Wire `0` is the constant one. Inputs occupy `1..=n` in declaration order.
+Nodes follow, densely numbered and topologically ordered — every argument
+refers to a strictly smaller wire. The backend enforces this rather than
+trusting it; a frontend bug that produced a forward reference would otherwise
+become a miscompiled circuit.
 
-- wire `0` — the field constant `1`;
-- wires `1..=n` — the declared inputs, in declaration order;
-- wires `n+1..` — one per node, in topological order.
-
-**Invariant:** every argument of a node refers to a strictly smaller wire.
-The backend validates this rather than trusting it — a frontend bug that
-reordered nodes would otherwise silently miscompile a circuit, and in this
-domain that means a security hole.
-
-## `inputs`
+## Inputs
 
 ```json
-{"wire": 1, "name": "x", "visibility": "private"}
+{"wire": 2, "name": "out", "visibility": "output", "line": 21}
 ```
 
-`visibility` is `private` or `public`. Public inputs become the verifier's
-input vector, **in declaration order**; that ordering is part of the contract.
+| `visibility` | Verifier sees it | Must be determined |
+|---|---|---|
+| `private` | no | no — it *is* the input |
+| `public` | yes | no — still an input the prover supplies |
+| `output` | yes | **yes** — proved by the frontend |
 
-## `nodes`
+`public` and `output` both land in the verifier's public input vector, in
+declaration order. The difference is the proof obligation.
 
-Every node has a `wire` and an `op`.
+## Nodes
 
 ```json
-{"wire": 5, "op": "const", "value": "1"}
-{"wire": 4, "op": "mul",   "args": [1, 3]}
-{"wire": 6, "op": "sub",   "args": [5, 2]}
-{"wire": 7, "op": "neg",   "args": [6]}
-{"wire": 3, "op": "hint",  "hint": "inv_or_zero", "name": "inv", "args": [1]}
+{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]}
 ```
 
-| `op`    | arity | notes                                                    |
-|---------|-------|----------------------------------------------------------|
-| `const` | 0     | `value` is a **decimal string**, possibly negative        |
-| `add`   | 2     |                                                          |
-| `sub`   | 2     |                                                          |
-| `mul`   | 2     |                                                          |
-| `neg`   | 1     |                                                          |
-| `hint`  | 1     | `hint` is `inv_or_zero` or `inv`; `name` is the source-level advice name |
-
-Constants are strings because field elements routinely exceed 64 bits and
-JSON numbers cannot carry them safely. Optimizer-folded constants may be
-negative; the backend reduces them modulo whichever prime it instantiates,
-which is what keeps the IR field-agnostic.
-
-`hint` nodes carry their source name for two reasons: error messages should
-say `inv`, not `wire 3`; and a prover must be able to **override** them
-explicitly — advice is by definition prover-chosen, and modelling a dishonest
-prover requires being able to say so.
-
-## `assertions`
+Operations: `const` (with `value`, a decimal **string** — field elements
+routinely exceed 64 bits, and JSON numbers are not safe at that width),
+`add`, `sub`, `mul`, `neg`, and `hint`.
 
 ```json
-{"lhs": 4, "rhs": 6, "label": "(x * inv) == (1 - out)", "line": 17}
+{"wire": 3, "advice_derived": true, "op": "hint", "hint": "inv_or_zero",
+ "name": "inv", "gadget": "is_zero", "line": 24, "args": [1]}
 ```
 
-`label` and `line` carry the original source text so a violated constraint can
-be reported against the user's code instead of an anonymous row index.
+A `hint` tells the witness solver how to compute a value that the constraints
+do not pin down by themselves. It costs one variable and **zero constraints**.
+`name` is the source-level name, which lets a prover override it by name —
+that is how the test suite models a dishonest prover.
 
-## What is *not* in version 1
+## Assertions
 
-Deliberately absent, and slated for the phases that need them:
+```json
+{"lhs": 4, "rhs": 6, "label": "(x * inv) == (1 - out)", "line": 26}
+```
 
-- **wire kinds** (`Determined` vs `Advice`) — phase 1 checks these in the
-  frontend and discards them. Phase 2 puts them in the IR, along with the
-  proof obligations discharged by the determinacy pass.
-- types beyond `field` (booleans, integers with range bounds, arrays);
-- information-flow labels for public/private;
-- gadget/module structure — version 1 is a single flat circuit.
+Each asserts two wires are equal. `label` and `line` exist so that a failing
+self-check can name the source assertion instead of a constraint index.
 
-Any of these is a schema-version bump, and backends must refuse versions they
-do not understand.
+## Determinacy
+
+```json
+"determinacy": {
+  "proved": true,
+  "targets": ["out"],
+  "branches": [["x == 0"], ["x != 0"]]
+}
+```
+
+The frontend's proof that every `output` is a function of the inputs, and the
+case splits it rested on.
+
+This record is the reason schema v2 exists. Soundness is not a property of
+"we used a good compiler" — it is a claim about *this* circuit, so it travels
+with the circuit. The backend **refuses to prove** an IR that declares outputs
+without a discharged proof, and a missing record deserializes to
+`proved: false` rather than defaulting to allow. Deleting the record is
+therefore not a way to get a proving key for an under-constrained circuit.
+
+An IR with no outputs (a pure relation, e.g. "I know a factorisation of 12")
+needs no proof, and the gate stays quiet.
