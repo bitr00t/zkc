@@ -20,13 +20,13 @@ import System.IO
   , hSetEncoding, openFile, stderr, stdout, utf8 )
 
 import Zkc.Analysis.Determinacy
-import Zkc.Core.Elaborate (elaborate)
+import Zkc.Core.Elaborate (elaborate, Elaborated(..))
 import Zkc.Core.Ir
 import Zkc.Core.Passes (optimize, renderStats, Stats(..))
 import Zkc.Diagnostics
 import Zkc.Emit.Json (emitJson)
 import Zkc.Field (fieldModulus, knownFields)
-import Zkc.Syntax.Parser (parseCircuit)
+import Zkc.Syntax.Parser (parseProgram)
 
 data Options = Options
   { optInput :: FilePath
@@ -93,15 +93,19 @@ run opts = do
 
 compile :: Options -> String -> Either Diagnostic (String, Ir, Stats, Report)
 compile opts source = do
-  circuit <- parseCircuit source
-  ir0 <- elaborate (optField opts) circuit
-  let (ir, stats) = if optOptimize opts then optimize ir0 else (ir0, Stats 0 0 0)
+  program <- parseProgram source
+  elab <- elaborate (optField opts) program
   modulus <- case fieldModulus (optField opts) of
     Just p -> Right p
     Nothing -> Left $ withHelp ("known fields: " ++ unwords (map fst knownFields))
       $ diag ("unknown field '" ++ optField opts ++ "'; the determinacy analysis \
               \needs its modulus to decide whether a coefficient is nonzero")
-  report <- either (Left . determinacyDiagnostic ir) Right (checkDeterminacy modulus ir)
+  -- Determinacy runs compositionally on the pre-optimisation skeletons: each
+  -- gadget is proved once, and the circuit reuses those proofs. Optimisation
+  -- preserves the solution set, so a proof valid here stays valid after it.
+  report <- either (Left . determinacyDiagnostic (elabIr elab)) Right
+              (checkProgram modulus (elabGadgetBodies elab) (elabCircuitBody elab))
+  let (ir, stats) = if optOptimize opts then optimize (elabIr elab) else (elabIr elab, Stats 0 0 0)
   Right (emitJson report ir, ir, stats, report)
 
 -- Determinacy reporting ------------------------------------------------
@@ -186,7 +190,7 @@ writeFileUtf8 path contents = do
 
 usage :: IO ()
 usage = mapM_ (hPutStrLn stderr)
-  [ "zkc — zero-knowledge circuit compiler (phase 2)"
+  [ "zkc — zero-knowledge circuit compiler (phase 3)"
   , ""
   , "usage:"
   , "  zkc build <file.zkc> [-o <out.json>] [--field <name>] [--no-opt]"

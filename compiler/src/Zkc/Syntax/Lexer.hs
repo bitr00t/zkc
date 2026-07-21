@@ -20,12 +20,12 @@ data Token = Token { tokKind :: Tok, tokLine :: Int }
 
 data Tok
   = TCircuit | TPrivate | TPublic | TOutput | TField | TGadget
-  | TLet | TAdvice | TAssert
+  | TLet | TAdvice | TAssert | TRequire
   | TIdent String
   | TNumber Integer
   | TLBrace | TRBrace | TLParen | TRParen
   | TColon | TSemi | TComma
-  | TPlus | TMinus | TStar | TEqEq | TEq
+  | TPlus | TMinus | TStar | TEqEq | TEq | TNe
   | TArrow
   | TEof
   deriving (Eq, Show)
@@ -42,6 +42,7 @@ describeTok t = case t of
   TLet      -> "'let'"
   TAdvice   -> "'advice'"
   TAssert   -> "'assert'"
+  TRequire  -> "'require'"
   TIdent s  -> "identifier '" ++ s ++ "'"
   TNumber n -> "number " ++ show n
   TLBrace   -> "'{'"
@@ -56,6 +57,7 @@ describeTok t = case t of
   TStar     -> "'*'"
   TEqEq     -> "'=='"
   TEq       -> "'='"
+  TNe       -> "'!='"
   TArrow    -> "'->'"
   TEof      -> "end of input"
 
@@ -88,10 +90,12 @@ lexer = go 1
       "let"     -> TLet
       "advice"  -> TAdvice
       "assert"  -> TAssert
+      "require" -> TRequire
       _         -> TIdent w
 
     symbol line s = case s of
       ('=':'=':rest) -> (Token TEqEq line :)   <$> go line rest
+      ('!':'=':rest) -> (Token TNe line :)     <$> go line rest
       ('-':'>':rest) -> (Token TArrow line :)  <$> go line rest
       ('{':rest)     -> (Token TLBrace line :) <$> go line rest
       ('}':rest)     -> (Token TRBrace line :) <$> go line rest

@@ -1,16 +1,27 @@
 -- | The surface syntax tree.
 --
--- The language is deliberately tiny in phase 1: one circuit, field-typed
--- wires, three statement forms. It is *not* Turing complete and never will
--- be — circuits are finite, so there is no unbounded recursion and every
--- loop (once loops exist) must be statically unrollable.
+-- The language is deliberately tiny and *not* Turing complete: circuits are
+-- finite, so there is no unbounded recursion and every loop (once loops
+-- exist) must be statically unrollable.
+--
+-- Phase 3 turns gadgets from inline markers into top-level, parameterised
+-- __definitions__. A source file is now a 'Program': zero or more
+-- 'GadgetDef's plus exactly one 'Circuit'. A gadget has parameters (wires
+-- the caller supplies), results (wires the caller allocates and the body
+-- constrains — output-parameters, so they fit the IR's \"declared atom
+-- pinned by assertions\" shape exactly), and 'Require' preconditions. It is
+-- reached from a call site, and each call is inlined with a fresh scope.
 module Zkc.Syntax.Ast
   ( Visibility(..)
   , ParamDecl(..)
   , Hint(..)
   , Expr(..)
   , Stmt(..)
+  , InstanceBind(..)
+  , Require(..)
+  , GadgetDef(..)
   , Circuit(..)
+  , Program(..)
   , exprSpan
   ) where
 
@@ -77,25 +88,60 @@ data Stmt
   -- construction.
   = SLet String Expr Int
   -- | @advice name = hint(..);@ — computes WITHOUT constraining. The
-  -- @unsafe@ of ZK: legal, but the value is not determined until some
-  -- assertion pins it down.
+  -- @unsafe@ of ZK: legal only inside a gadget definition, and the value is
+  -- not determined until some assertion pins it down.
   | SAdvice String Hint Int
   -- | @assert lhs == rhs;@ — emits a constraint.
   | SAssert Expr Expr Int
-  -- | @gadget name { .. }@ — the quarantine for raw advice.
+  -- | A gadget instantiation. Either
   --
-  -- Outside a gadget, @advice@ is a compile error. Inside one, it is
-  -- allowed but every declared output still has to be proved determined,
-  -- so the block is an explicit \"I am doing something subtle here\"
-  -- marker rather than an escape hatch.
+  --   * @(o, ..) = g(args);@   — bind results to already-declared outputs
+  --     (or, inside a gadget body, to the enclosing gadget's own results);
+  --   * @let (r, ..) = g(args);@ — allocate fresh result wires.
   --
-  -- Phase-2 gadgets are markers, not scopes: bindings inside are visible
-  -- outside. Phase 3 turns them into reusable parameterised definitions.
-  | SGadget String [Stmt] Int
+  -- The call is inlined at elaboration with a fresh scope. Determinacy does
+  -- /not/ re-expand it: the gadget's proved summary is applied instead.
+  | SInstance InstanceBind String [Expr] Int
   deriving (Eq, Show)
+
+-- | How an instance binds its results.
+data InstanceBind
+  = BindExisting [String]   -- ^ @(o, ..) = g(args);@
+  | BindFresh [String]      -- ^ @let (r, ..) = g(args);@
+  deriving (Eq, Show)
+
+-- | A gadget precondition: @require name != 0;@.
+--
+-- It is both an assumption the gadget's determinacy proof may lean on and an
+-- obligation each call site must discharge from its own nonzero context.
+data Require = Require
+  { rqName :: String
+  , rqLine :: Int
+  } deriving (Eq, Show)
+
+-- | A parameterised, reusable gadget.
+--
+-- Parameters and results are all field-typed. Results are output-parameters:
+-- the caller allocates the wire, the body constrains it — which is exactly
+-- the shape the IR already uses for a circuit's declared outputs, so nothing
+-- downstream has to learn a new concept.
+data GadgetDef = GadgetDef
+  { gdName :: String
+  , gdParams :: [String]
+  , gdResults :: [String]
+  , gdRequires :: [Require]
+  , gdBody :: [Stmt]
+  , gdLine :: Int
+  } deriving (Eq, Show)
 
 data Circuit = Circuit
   { circName :: String
   , circParams :: [ParamDecl]
   , circBody :: [Stmt]
+  } deriving (Eq, Show)
+
+-- | A whole source file: the gadget definitions plus the one circuit.
+data Program = Program
+  { progGadgets :: [GadgetDef]
+  , progCircuit :: Circuit
   } deriving (Eq, Show)

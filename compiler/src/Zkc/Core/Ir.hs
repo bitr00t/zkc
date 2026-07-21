@@ -22,6 +22,8 @@ module Zkc.Core.Ir
   , Node(..)
   , Assertion(..)
   , Ir(..)
+  , InstanceSite(..)
+  , Body(..)
   , constOneWire
   , opArgs
   , isHint
@@ -95,6 +97,37 @@ data Ir = Ir
   , irInputs :: [IrInput]
   , irNodes :: [Node]        -- ^ topologically ordered: args always precede
   , irAssertions :: [Assertion]
+  } deriving (Eq, Show)
+
+-- | A retained gadget instantiation, the unit of /compositional/ determinacy.
+--
+-- The flat 'Ir' inlines every gadget away, which is all the backend needs.
+-- But the determinacy pass must not re-expand a gadget per call site — that is
+-- what blows the monomial budget on a deep Merkle path. So elaboration keeps,
+-- alongside the flat IR, the shape of each call: which gadget, the wires its
+-- arguments landed on, and the wires its results landed on. The proof then
+-- applies the gadget's /summary/ here instead of expanding its body.
+data InstanceSite = InstanceSite
+  { isGadget :: String
+  , isArgs :: [WireId]     -- ^ argument wires, in parameter order
+  , isResults :: [WireId]  -- ^ result wires, in result order
+  , isLine :: Int
+  } deriving (Eq, Show)
+
+-- | The determinacy-facing view of a scope (a gadget body or the circuit).
+--
+-- It separates a scope's /own/ primitive content — the nodes and assertions
+-- written directly in it — from the gadget instances it contains, which are
+-- handled by summary rather than expansion. Atoms are the input wires plus any
+-- instance-result wires (values the scope does not compute itself).
+data Body = Body
+  { bodyParams :: [WireId]        -- ^ determined on entry (a gadget's params, or the circuit's non-output inputs)
+  , bodyResultTargets :: [WireId] -- ^ wires that must be proved determined
+  , bodyRequires :: [WireId]      -- ^ param wires assumed nonzero (from @require@)
+  , bodyAtoms :: [IrInput]        -- ^ every atom in scope, for naming and taint
+  , bodyNodes :: [Node]           -- ^ own nodes only (not inside nested instances)
+  , bodyAsserts :: [Assertion]    -- ^ own assertions only
+  , bodyInstances :: [InstanceSite]
   } deriving (Eq, Show)
 
 opArgs :: Op -> [WireId]
