@@ -1,0 +1,2 @@
+{ "comment": "b = 0. The circuit is unsatisfiable here by construction: the reciprocal gadget asserts b * inv_b == 1, which no witness can meet. The determinacy proof relies on exactly this — the b == 0 branch is infeasible.",
+  "inputs": { "a": "12", "b": "0", "q": "0" } }

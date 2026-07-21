@@ -1,0 +1,2 @@
+{ "comment": "2 * 6 = 12. Both wires are public inputs; the circuit has no outputs, so nothing had to be proved determined.",
+  "inputs": { "a": "2", "b": "6" } }
