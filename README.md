@@ -1,214 +1,243 @@
-# zkc — a zero-knowledge circuit compiler
+# zkc — phase 3: gadgets become definitions
 
-**Phase 2: the type system.** A compiler that refuses to compile
-under-constrained circuits, and tells you why.
-
-Written from scratch: own language, own IR, own analyses. Haskell frontend,
-Rust backend. No circuit-compiler framework is being wrapped — the only
-borrowed component is the Groth16 prover itself (arkworks), which phase 5
-replaces with an own FRI-based prover.
-
-## The problem this phase solves
-
-The dominant class of vulnerability in production ZK circuits is not a broken
-proof system. It is an **under-constrained circuit**: the prover is given a
-degree of freedom the author did not notice, and can produce a cryptographically
-valid proof of a false statement. The proof system is doing its job perfectly —
-it is faithfully proving a claim that does not mean what the author thought.
-
-Phase 0 of this project demonstrated the attack end to end: a valid Groth16
-proof that `5 == 0`. Phase 1 built a working compiler that would happily
-produce exactly that circuit.
-
-Phase 2 makes it a compile error.
+A zero-knowledge circuit compiler built from scratch: **Haskell frontend,
+Rust backend**. Phase 2 made under-constraining a *compile error* — the
+determinacy pass proves each declared output is a function of the inputs, or
+refuses to emit. Phase 3 makes that guarantee **compose**: gadgets stop being
+inline markers and become parameterised, reusable definitions, and the proof
+follows them — a gadget is proved once, and every call site reuses the result
+instead of re-deriving it.
 
 ```
-$ zkc build examples/iszero_broken.zkc
-error: output 'out' is not determined by the circuit's inputs
-  --> examples/iszero_broken.zkc:14
-      |
-   14 |     output out: field;
-      |
-     = under the assumption x != 0, the constraints admit more than one value of 'out'
-     = the prover also chooses the advice value 'inv' freely
-     = so two witnesses can agree on every input and still disagree on 'out' —
-       the prover picks which one to prove
-help: add a constraint that forces 'out' in this case, then recompile
+.zkc source ──▶ lexer ──▶ parser ──▶ elaborate ──▶ Core IR ──▶ passes ──▶ JSON
+                          (program)      │  │       ( Haskell )             │
+                                         │  └─▶ Body skeletons ─┐           ▼
+                                         │                      │   (Rust backend,
+                                  determinacy ◀─ summaries ◀────┘    unchanged)
+                                  (compositional)
 ```
 
-The compiler did not pattern-match a known bug. It *proved* that the correct
-`IsZero` gadget is sound, tried to prove the same about this one, and reports
-the branch where the proof fails.
-
-## Quick start
+The pipeline is the phase-2 pipeline with two changes: elaboration now parses
+a **program** (gadget definitions plus one circuit) and produces, alongside
+the flat IR, a *skeleton* per scope; and the determinacy pass consumes those
+skeletons compositionally rather than expanding the whole inlined circuit.
 
 ```bash
-make -C compiler all && make -C compiler test     # 54 checks
-cd backend && cargo test && cargo build --release # 19 tests
-./scripts/run_all.sh                              # the whole story
+make -C compiler test      # 74 checks, hand-rolled harness, GHC boot libs only
+make -C compiler all       # build the `zkc` CLI
+./compiler/build/zkc build examples/divide.zkc --explain
 ```
 
-Requires GHC (≥ 9.4) and Rust (≥ 1.75). The compiler uses only GHC boot
-libraries — no Hackage packages, no Stack, no Cabal.
+Requires GHC (tested on 9.4.7). The compiler still uses **only GHC's boot
+libraries** — no cabal, no Hackage, `make` and go.
 
-## The language
+## Phase 3 is three workstreams
 
-```
+Phase 3 has three independent pieces. The design note (`docs/phase3.md`)
+argues for the order **A → C → B**: A is a prerequisite for both of the
+others (compositional determinacy keeps B's SMT queries small, and reusable
+gadgets are what let you *write* the SHA-256 / Merkle circuits C benchmarks).
+
+| | Workstream | Status |
+|---|---|---|
+| **A** | Gadgets as parameterised definitions + compositional determinacy | **done** |
+| C | Constraint-count optimization (assertion fusion), benchmarked vs Circom | next |
+| B | SMT escalation: three-valued proved / refuted / unknown | after C |
+
+This README documents **Workstream A**, which is implemented and tested. B and
+C are specified at the end.
+
+## What Workstream A delivers
+
+**Gadgets are top-level definitions.** A source file is now a *program*: zero
+or more gadget definitions plus exactly one circuit. A gadget has field-typed
+parameters, field-typed results, and optional `require` preconditions.
+
+```rust
+gadget is_zero(x: field) -> (out: field) {
+    advice inv = inv_or_zero(x);
+    assert x * inv == 1 - out;
+    assert x * out == 0;
+}
+
 circuit IsZero {
     private x: field;
     output out: field;
-
-    gadget is_zero {
-        advice inv = inv_or_zero(x);
-
-        assert x * inv == 1 - out;
-        assert x * out == 0;
-    }
+    (out) = is_zero(x);
 }
 ```
 
-Three ideas carry the phase.
+**Real scopes.** A gadget body is its own scope: its bindings do not leak into
+the circuit, and the circuit's bindings are not visible inside it — only
+parameters and results cross the boundary. Each instantiation gets **fresh
+wires**, so calling the same gadget twice can never accidentally share state.
+These were exactly the properties phase-2 marker gadgets lacked.
 
-### 1. `output` is not `public`
+**Two call forms, one per result kind.** A result the body only *constrains*
+(a bare atom, like `out` above) binds to an already-declared output:
 
-Phase 1 had `private` and `public`, and that turned out to make the central
-question ill-posed. "Is this value determined?" only has an answer once you
-know whether the circuit is meant to *compute* it.
-
-```
-circuit Relation {
-    public a: field;
-    public b: field;
-    assert a * b == 12;
-}
+```rust
+(out) = is_zero(x);
 ```
 
-This is a perfectly sound "I know a factorisation of 12" statement. Neither
-`a` nor `b` is determined, and neither should be — `(2,6)` and `(3,4)` are
-both legitimate witnesses. A checker demanding determinacy here would be
-wrong.
+A result the body *computes* — produced by `advice` or `let` — is bound
+freshly with `let`:
 
-So the language separates the roles: `private` and `public` are **inputs**
-(the prover supplies them; nothing is claimed about where they came from),
-while `output` is a value the circuit **computes** — and carries a proof
-obligation. `Relation` compiles with "nothing to prove"; `IsZero` compiles
-with a two-case proof.
-
-### 2. `advice` is quarantined
-
-`let` computes *and* constrains, so ordinary circuit code cannot create an
-unconstrained value at all. `advice` computes *without* constraining — it is
-the one construct that can silently make a circuit unsound.
-
-It is therefore only legal inside a `gadget` block. Writing it becomes a
-deliberate, greppable act rather than something that slips in during a
-refactor. The block is the author saying: *I know this is subtle, and I claim
-the assertions here pin the outputs down anyway.*
-
-The determinacy pass then checks that claim.
-
-### 3. Determinacy is proved, not assumed
-
-Each assertion becomes a polynomial equation `P = 0` over the circuit's atoms
-(declared wires and advice wires). Two rules are applied to exhaustion:
-
-- **Linear propagation.** If an equation reads `c * u + r = 0` where `u` is
-  the only undetermined atom and `c`, `r` are computable from determined
-  atoms, and `c` is known nonzero, then `u = -r/c` is determined. Fields have
-  no zero divisors, so a product of nonzero values is nonzero — that is what
-  makes `c` checkable.
-- **Case splitting.** When propagation stalls, branch on `w = 0` versus
-  `w != 0` for some determined atom `w`. In the zero branch every monomial
-  containing `w` vanishes; in the nonzero branch `w` unblocks coefficients.
-  If *both* branches determine the outputs, so does the circuit.
-
-Neither rule alone can verify `IsZero`. The proof needs the split:
-
-```
-$ zkc build examples/iszero.zkc --explain
-  determinacy: 1 output(s) proved determined (out), 2 case(s)
-    case x == 0      # x*inv == 1-out collapses to 0 == 1-out, so out = 1
-    case x != 0      # x*out == 0 with x invertible, so out = 0
+```rust
+let (inv_b) = reciprocal(b);
+assert q == a * inv_b;
 ```
 
-A branch whose equations reduce to a nonzero constant is *infeasible* — no
-witness exists there — and counts as discharged. That is how `Divide` works:
+Instantiation is always a *statement*, never a sub-expression, so elaboration
+never inlines inside an expression tree, and the `(` after `let`
+disambiguates a fresh-result instance from a scalar `let`.
+
+**Compositional determinacy.** Each gadget is proved **once**, as its own
+little determinacy problem — its parameters determined, its results the
+targets — yielding a `Summary`. At a call site the summary is *applied*: the
+results are marked determined and any nonzero guarantee is recorded, without
+re-expanding the body into the caller's polynomial system. Gadgets are proved
+in dependency order (callees first); cycles are rejected, because a circuit is
+finite and gadgets cannot recurse.
+
+**Preconditions.** `require p != 0` is both an assumption the gadget's proof
+may lean on and an obligation each call site must discharge from its own
+nonzero context. A gadget also *exports* the parameters its body forces
+nonzero (detected by the same infeasibility argument the proof already uses),
+so one gadget's guarantee can discharge another's requirement.
+
+## The example rewrite, and the point of it
+
+`examples/iszero.zkc` and `examples/divide.zkc` are rewritten from phase-2
+inline gadgets to phase-3 definitions. The claim being tested is that the
+rewrite is **behaviour-preserving**: the flat IR handed to the backend is the
+same.
+
+It is — byte for byte, modulo the `"line"` fields that legitimately move when
+the definition relocates to the top of the file. Same wires, same operations,
+same assertions, same determinacy record (`branches: [["x == 0"],["x != 0"]]`
+for `IsZero`, `[["b == 0"],["b != 0"]]` for `Divide`). The two examples also
+exercise both call forms: `is_zero`'s `out` is an atom result (`(out) = ...`),
+`reciprocal`'s `inv_b` is a computed result (`let (inv_b) = ...`).
+
+**Why this matters more than it looks.** Composition is not just ergonomics —
+it changes what is *provable*. Four independent `is_zero` instances each need
+their own `x == 0` / `x != 0` case split; four splits exceed the depth bound,
+so proving them all at once on the inlined IR **gives up**. Proving the gadget
+once and reusing the summary four times **succeeds**. Same circuit, one path
+fails and the other holds:
 
 ```
-$ zkc build examples/divide.zkc --explain
-  determinacy: 1 output(s) proved determined (q), 2 case(s)
-    case b == 0      # b * inv_b == 1 becomes 0 == 1: no witness exists
-    case b != 0      # inv_b determined, then q determined through it
+Many (four is_zero instances)
+  monolithic (inlined IR)   →  rejected: 4 case splits exceed depth bound 3
+  compositional (summaries) →  proved: one gadget proof, reused four times
 ```
 
-Note what is **not** required: advice wires need not be determined. When
-`x = 0`, `IsZero`'s helper `inv` genuinely may be anything, and the circuit is
-still sound because `out` is pinned regardless. A checker that demanded every
-advice wire be determined would reject correct code. Soundness is about
-outputs.
+That is the property the phase-3 design note calls the prerequisite for
+everything downstream: without it, a 32-deep Merkle path is unprovable by the
+decidable fragment, and there is nothing small enough to hand an SMT solver.
+The per-gadget case analyses also **concatenate** in the report (2N paths for
+N instances), rather than exploding into a 2^N cross-product.
 
-## Soundness travels with the artifact
+## Design decisions worth naming
 
-The emitted IR (schema v2) carries the proof:
+Full reasoning is in `docs/phase3.md`; the load-bearing choices:
 
-```json
-"determinacy": {
-  "proved": true,
-  "targets": ["out"],
-  "branches": [["x == 0"], ["x != 0"]]
-}
+**Results are output-parameters.** The IR already represents a
+"constrained-not-computed" wire exactly one way — as a declared output pinned
+by assertions. Making gadget results the same shape means the backend, the IR
+schema, and the JSON emitter learn nothing new, and the rewritten examples
+produce identical IR. Results the body computes (via `advice`/`let`) are also
+usable, which required a small, backward-compatible extension to the
+determinacy pass so a *node* (not just an atom) can be a target.
+
+**Determinacy runs before optimization now.** Phase 2 ran it after, to keep
+polynomial expansion cheap. Compositional proofs are already small
+per-gadget, so that rationale is gone; running before optimization lets the
+proof see the gadget structure directly. Optimization preserves the solution
+set, so a proof valid before it stays valid after.
+
+**A gadget's internal splits stay internal.** They are discharged inside its
+summary; the caller sees "results determined" plus any nonzero guarantee, not
+the callee's case analysis. This is what keeps the query the caller reasons
+about small — the whole point of composition.
+
+## Scope, drawn on purpose
+
+- **Intermediate composition is deferred.** Results bind to declared outputs
+  or to body-computed wires. Feeding a gadget's result as a *fresh,
+  non-output* intermediate into a further expression — Poseidon-in-Merkle
+  style — needs a wire that is pinned only by constraints and has no defining
+  node, which touches the Rust witness solver and the IR schema. That is
+  follow-up work; deep reuse here is demonstrated with many output-binding
+  instances.
+- **`require` is a precondition, not an enforcement.** The caller must
+  establish the nonzero fact (from a nonzero literal or a prior gadget's
+  guarantee); the gadget does not add a constraint to make it true. Neither
+  shipped example needs it — `Divide` works through the internal
+  infeasibility of `b == 0` — so the syntax is there for the standard library
+  to come.
+- **The backend was not re-run in this iteration.** Backend compatibility is
+  established by the IR byte-diff against the phase-2 output, not by an
+  end-to-end proof, because this change is frontend-only by construction.
+
+## Layout (what changed)
+
+```
+zkc/
+├── compiler/src/Zkc/
+│   ├── Syntax/Lexer.hs     #  + `require`, `!=`
+│   ├── Syntax/Ast.hs       #  + GadgetDef, Program, Require, SInstance
+│   ├── Syntax/Parser.hs    #  program grammar: definitions + one circuit
+│   ├── Core/Ir.hs          #  + InstanceSite, Body (the determinacy skeleton)
+│   ├── Core/Elaborate.hs   #  scopes, inlining, and skeletons in one pass
+│   ├── Analysis/Determinacy.hs  #  checkProgram, summaries, searchWith
+│   └── Main.hs             #  program pipeline; determinacy before optimize
+├── examples/
+│   ├── iszero.zkc          #  rewritten: atom-result call form
+│   └── divide.zkc          #  rewritten: computed-result call form
+└── compiler/tests/Spec.hs  #  74 checks
 ```
 
-The Rust backend **refuses to prove** an IR that declares outputs without a
-discharged proof, and a missing record deserializes to `proved: false` rather
-than defaulting to allow. Soundness is a claim about *this circuit*, not about
-the toolchain that happened to produce it — so it is checked at the point of
-use, not asserted in a README.
+The backend (`backend/`), the IR schema (`ir-spec/SCHEMA.md`), and the JSON
+emitter are untouched.
 
-## What it does not do
+## Tests
 
-The analysis is **incomplete, and deliberately conservative**: a failure means
-"not proved", not "proved unsound". Since the pass rejects on failure,
-incompleteness costs expressiveness — never safety.
+`make -C compiler test` — 74 checks (up from 54). Beyond the phase-2 suite,
+re-pointed at the new syntax:
 
-Concretely:
+- **parser** — gadget signatures, both instance forms, `require` at the body
+  head, "exactly one circuit".
+- **scoping** — internal bindings do not leak; each instance gets fresh wires.
+- **elaboration** — unknown gadget, arity mismatch, dead advice inside a
+  gadget.
+- **compositional** — `IsZero`/`Divide` proved by summary with branches
+  remapped to the caller; four instances proved by reuse; the *same* circuit
+  rejected monolithically (the scaling test); branches concatenate, not
+  explode.
+- **require** — a gadget provable only under its precondition; the
+  precondition discharged by a prior guarantee; an undischarged precondition
+  as a compile-time failure.
+- **golden** — the rewritten examples inline to the phase-2 shape.
 
-- Case splitting is depth-bounded (3). Deeper proofs are refused, not guessed.
-- Polynomial expansion is exponential in the worst case, with a hard cap and a
-  clear error rather than a hang.
-- Degree ≥ 2 in the unknown is never solved: `z * z == 4` has two roots, so
-  `z` is correctly reported as undetermined.
-- Gadgets are quarantine markers, not scopes or reusable definitions yet.
+## Next
 
-Phase 3 addresses the first two by escalating to an SMT solver when the
-decidable fragment gives up, and the last by making gadgets parameterised
-definitions.
+**Workstream C — constraint-count optimization.** Phase 2's optimizer does
+constant folding, CSE and DCE. Competitive lowering needs
+multiplicative-assertion fusion: `assert a*b == c` currently lowers to two
+R1CS constraints where R1CS expresses it in one. The fusion belongs in the
+backend's `lower.rs`, not in `Passes.hs`, to keep the Core IR
+arithmetization-neutral. Benchmarked against Circom on SHA-256 and Merkle
+inclusion — circuits that Workstream A's reusable gadgets now make writable.
 
-## Layout
+**Workstream B — SMT escalation.** When the decidable fragment gives up, emit
+the residual question to an SMT solver over the field instead of rejecting.
+The decidable core stays the fast path; the solver handles the tail, and —
+crucially — distinguishes **refuted** (with a counterexample: two witnesses
+agreeing on inputs, disagreeing on an output) from **unknown**, where phase 2
+collapses both into "rejected". A refutation hands the author the exact
+attack. Composition from Workstream A is what keeps each query small enough to
+be answerable.
 
-```
-compiler/                 Haskell frontend (GHC boot libraries only)
-  src/Zkc/Syntax/         lexer, parser, AST
-  src/Zkc/Core/           elaboration, Core IR, optimizer
-  src/Zkc/Analysis/       Poly.hs (multivariate polys over F_p)
-                          Determinacy.hs (the proof search)
-  src/Zkc/Diagnostics.hs  source-quoting error messages
-  src/Zkc/Field.hs        field moduli
-  test/Spec.hs            54 checks, hand-rolled harness
-backend/                  Rust
-  zkc-core/               IR loading + validation, witness solver,
-                          R1CS lowering and checker
-  zkc-prove/              arkworks Groth16 bridge + CLI
-examples/                 .zkc circuits, including two that must NOT compile
-ir-spec/SCHEMA.md         the Haskell/Rust contract, versioned
-docs/                     design decisions and roadmap
-```
-
-## Notes on the environment
-
-- The compiler depends on **nothing** outside GHC's boot libraries — lexer,
-  parser and JSON writer are hand-rolled. `make all` is the whole build.
-- `rust-toolchain.toml` pins 1.75.0 and `Cargo.lock` pins four transitive
-  dependencies to their last 1.75-compatible releases (`zeroize`,
-  `zeroize_derive`, `rayon`, `rayon-core`). On a modern toolchain both pins
-  can simply be deleted.
+See `docs/ROADMAP.md` for phases 4–7.
