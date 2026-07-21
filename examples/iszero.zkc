@@ -1,28 +1,27 @@
-// out = 1 if x == 0, else 0.  The classic ZK gadget.
+// out = 1 if x == 0, else 0.  The classic ZK gadget — now a reusable
+// parameterised definition rather than an inline block.
 //
 // `inv` cannot be computed by the constraint system, only guessed by the
-// prover — so it is `advice`, and advice is only legal inside a `gadget`
-// block. The block is the author saying: I know this is subtle, and I am
-// claiming the assertions below pin the output down anyway.
+// prover, so it is `advice` — legal only inside a `gadget` definition. The
+// definition is the author saying: I know this is subtle, and I claim the
+// assertions below pin the result down anyway.
 //
-// The determinacy pass then checks that claim. It cannot do so by linear
-// reasoning alone; it has to case-split on whether x is zero:
+// `out` is a result the body only *constrains* (it never assigns it), so the
+// caller binds it to a declared output with the (out) = ... form.
 //
-//   x == 0:  the first assertion collapses to  0 == 1 - out,  so out = 1
-//   x != 0:  the second gives  x * out == 0  with x invertible, so out = 0
-//
-// Note `inv` itself is NOT determined when x == 0 — it may be anything.
-// That is fine and the checker allows it: soundness is about the OUTPUT.
-//
-// Compile with --explain to see both cases printed.
+// The determinacy pass proves the gadget ONCE, case-splitting on whether x is
+// zero:  x == 0 forces out = 1 (first assertion), x != 0 forces out = 0
+// (second, x invertible).  Every instantiation then reuses that one proof.
+gadget is_zero(x: field) -> (out: field) {
+    advice inv = inv_or_zero(x);
+
+    assert x * inv == 1 - out;
+    assert x * out == 0;
+}
+
 circuit IsZero {
     private x: field;
     output out: field;
 
-    gadget is_zero {
-        advice inv = inv_or_zero(x);
-
-        assert x * inv == 1 - out;
-        assert x * out == 0;
-    }
+    (out) = is_zero(x);
 }

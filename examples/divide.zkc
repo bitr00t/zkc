@@ -1,24 +1,21 @@
-// q = a / b, which is only meaningful when b != 0.
+// q = a / b, meaningful only when b != 0.
 //
-// A second gadget that the determinacy pass handles, and it exercises a
-// different part of the proof search:
+// `reciprocal` returns 1/b as a *computed* result (produced by advice), so the
+// circuit binds it freshly with `let` and pins q with its own assertion.
 //
-//   b == 0:  `b * inv_b == 1` becomes  0 == 1  — the branch is INFEASIBLE.
-//            No witness exists at all, so there is nothing to determine and
-//            the obligation is discharged vacuously. (This is also how the
-//            circuit enforces b != 0: no prover can satisfy it otherwise.)
-//   b != 0:  inv_b is determined by the first assertion, and then `q` is
-//            determined by the second — determinacy chaining through an
-//            advice wire that has itself just been pinned down.
+// Proving reciprocal once shows inv_b determined by b, and — because the
+// b == 0 branch is infeasible (0 == 1) — that b is guaranteed nonzero, a fact
+// the summary exports for callers to reuse.
+gadget reciprocal(b: field) -> (inv_b: field) {
+    advice inv_b = inv(b);
+    assert b * inv_b == 1;
+}
+
 circuit Divide {
     private a: field;
     private b: field;
     output q: field;
 
-    gadget reciprocal {
-        advice inv_b = inv(b);
-        assert b * inv_b == 1;
-    }
-
+    let (inv_b) = reciprocal(b);
     assert q == a * inv_b;
 }
