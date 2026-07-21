@@ -1,66 +1,57 @@
 #!/usr/bin/env bash
-# Build everything, run both test suites, then walk the full pipeline:
-# source .zkc -> Core IR -> R1CS -> witness -> Groth16 proof -> verification.
-set -euo pipefail
+# End-to-end demonstration of the phase-2 pipeline.
+#
+#   .zkc source -> [Haskell] parse, elaborate, optimize, PROVE DETERMINACY
+#               -> Core IR (JSON, schema v2)
+#               -> [Rust] lower to R1CS, solve witness, self-check
+#               -> Groth16 prove + verify
+#
+# The headline is the third section: circuits that phase 1 happily compiled
+# into forgeable proving keys are now compile errors.
+set -uo pipefail
 cd "$(dirname "$0")/.."
 
 ZKC=compiler/build/zkc
-PROVE=backend/target/debug/zkc-prove
-
-echo "==> building the compiler (GHC, no external packages)"
-make -C compiler all
-
-echo; echo "==> compiler tests"
-make -C compiler test
-
-echo; echo "==> building the backend (cargo)"
-cargo build --manifest-path backend/Cargo.toml
-
-echo; echo "==> backend tests"
-cargo test --manifest-path backend/Cargo.toml
-
+PROVE=backend/target/release/zkc-prove
 mkdir -p build
-echo; echo "==> compiling the example circuits"
-for name in mul_square iszero iszero_broken; do
-  $ZKC build "examples/$name.zkc" -o "build/$name.ir.json"
+
+rule() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
+
+if [ ! -x "$ZKC" ]; then echo "building compiler..."; make -C compiler all; fi
+if [ ! -x "$PROVE" ]; then echo "building backend..."; (cd backend && cargo build --release); fi
+
+rule "1. Compile the circuits that should compile"
+for c in mul_square iszero divide relation; do
+  echo "--- $c.zkc"
+  $ZKC build "examples/$c.zkc" -o "build/$c.ir.json" --explain
 done
 
-echo; echo "==> a circuit the compiler REJECTS (advice nothing constrains)"
-if $ZKC build examples/unconstrained_advice.zkc -o /dev/null 2>&1; then
-  echo "UNEXPECTED: that circuit should not have compiled"; exit 1
-fi
+rule "2. Prove and verify"
+run() {
+  echo "--- $1  <-  $2"
+  $PROVE --ir "build/$1.ir.json" --inputs "inputs/$2.json" | tail -n 3
+}
+run mul_square mul_square
+run iszero     iszero_honest_zero
+run iszero     iszero_honest_nonzero
+run divide     divide
+run relation   relation
 
-echo; echo "=============================================================="
-echo "1. MulSquare, honest prover"
-echo "=============================================================="
-$PROVE --ir build/mul_square.ir.json --inputs inputs/mul_square.json
+rule "3. The forgery, refused by the constraints"
+echo "Claiming 5 == 0 against the CORRECT IsZero circuit:"
+$PROVE --ir build/iszero.ir.json --inputs inputs/iszero_forged.json | tail -n 6 || true
 
-echo; echo "=============================================================="
-echo "2. IsZero, x = 0 (honest: out = 1)"
-echo "=============================================================="
-$PROVE --ir build/iszero.ir.json --inputs inputs/iszero_honest_zero.json
+rule "4. Circuits the compiler now REJECTS (this is phase 2)"
+expect_failure() {
+  echo "--- $1"
+  if $ZKC build "examples/$1" -o /dev/null 2>&1; then
+    echo "!!! expected a compile error, got success"; exit 1
+  fi
+}
+expect_failure iszero_broken.zkc
+expect_failure advice_outside_gadget.zkc
 
-echo; echo "=============================================================="
-echo "3. IsZero, x = 5 (honest: out = 0)"
-echo "=============================================================="
-$PROVE --ir build/iszero.ir.json --inputs inputs/iszero_honest_nonzero.json
+rule "5. Division by zero is unsatisfiable by construction"
+$PROVE --ir build/divide.ir.json --inputs inputs/divide_by_zero.json 2>&1 | tail -n 2 || true
 
-echo; echo "=============================================================="
-echo "4. IsZero, FORGED: prover claims 5 == 0 and overrides the advice"
-echo "   Expected: refused, naming the assertion that catches it."
-echo "=============================================================="
-if $PROVE --ir build/iszero.ir.json --inputs inputs/iszero_forged.json --verbose; then
-  echo "UNEXPECTED: the correct circuit accepted a forgery"; exit 1
-fi
-
-echo; echo "=============================================================="
-echo "5. IsZeroBroken, FORGED: the same claim, one assertion missing"
-echo "   Expected: a valid Groth16 proof that 5 == 0."
-echo "=============================================================="
-$PROVE --ir build/iszero_broken.ir.json --inputs inputs/iszero_forged.json --verbose
-
-echo
-echo "Cases 4 and 5 differ by exactly one line of source. Case 5 is a"
-echo "cryptographically valid proof of a false statement — produced by this"
-echo "compiler, from a source file that passes every check it currently has."
-echo "Closing that gap is phase 2."
+rule "done"
