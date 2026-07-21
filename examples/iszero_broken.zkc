@@ -1,17 +1,21 @@
-// DELIBERATELY VULNERABLE — the same circuit with assertion (2) removed.
+// DELIBERATELY VULNERABLE — the same circuit with the second assertion gone.
 //
-// This file compiles cleanly. Every phase-1 check passes: `inv` is advice,
-// but it *is* mentioned by an assertion, so the "unconstrained advice"
-// heuristic is satisfied. The circuit is still forgeable: a prover can pick
-// inv = (1 - out)/x and claim any `out` it likes.
+// In phase 1 this compiled cleanly and produced a forgeable circuit: a
+// prover could pick inv = (1 - out)/x and claim any `out` it liked.
 //
-// That gap is the entire motivation for phase 2's determinacy pass. Compile
-// it, prove with it, and watch the backend accept a proof that 5 == 0.
+// In phase 2 it is a COMPILE ERROR. Try it:
+//
+//     zkc build examples/iszero_broken.zkc -o /dev/null
+//
+// The determinacy pass splits on x, proves `out` determined when x == 0,
+// and reports that under x != 0 it is not.
 circuit IsZeroBroken {
     private x: field;
-    public out: field;
+    output out: field;
 
-    advice inv = inv_or_zero(x);
+    gadget is_zero {
+        advice inv = inv_or_zero(x);
 
-    assert x * inv == 1 - out;
+        assert x * inv == 1 - out;
+    }
 }

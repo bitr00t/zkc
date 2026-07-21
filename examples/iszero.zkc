@@ -1,19 +1,28 @@
 // out = 1 if x == 0, else 0.  The classic ZK gadget.
 //
-// `inv` cannot be computed by the constraint system, only *guessed* by the
-// prover and then pinned down. That is what `advice` marks: a value the
-// witness generator produces which no constraint yet determines.
+// `inv` cannot be computed by the constraint system, only guessed by the
+// prover — so it is `advice`, and advice is only legal inside a `gadget`
+// block. The block is the author saying: I know this is subtle, and I am
+// claiming the assertions below pin the output down anyway.
 //
-// Both assertions are required:
-//   (1) forces out = 0 whenever x != 0 (given a well-chosen inv)
-//   (2) forces out = 0 whenever x != 0 for ANY inv the prover picks
-// Drop (2) and the circuit becomes forgeable — see iszero_broken.zkc.
+// The determinacy pass then checks that claim. It cannot do so by linear
+// reasoning alone; it has to case-split on whether x is zero:
+//
+//   x == 0:  the first assertion collapses to  0 == 1 - out,  so out = 1
+//   x != 0:  the second gives  x * out == 0  with x invertible, so out = 0
+//
+// Note `inv` itself is NOT determined when x == 0 — it may be anything.
+// That is fine and the checker allows it: soundness is about the OUTPUT.
+//
+// Compile with --explain to see both cases printed.
 circuit IsZero {
     private x: field;
-    public out: field;
+    output out: field;
 
-    advice inv = inv_or_zero(x);
+    gadget is_zero {
+        advice inv = inv_or_zero(x);
 
-    assert x * inv == 1 - out;
-    assert x * out == 0;
+        assert x * inv == 1 - out;
+        assert x * out == 0;
+    }
 }

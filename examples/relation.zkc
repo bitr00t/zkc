@@ -1,0 +1,15 @@
+// "I know a factorisation of 12."
+//
+// Both wires are public INPUTS, not outputs: the circuit asserts a relation
+// rather than computing a function. Nothing needs to be determined here —
+// (a=2,b=6) and (a=3,b=4) are both legitimate witnesses — and the compiler
+// says so instead of forcing a proof obligation that does not apply.
+//
+// This is exactly why phase 2 split `public` into `public` and `output`:
+// in phase 1, "is this determined?" had no well-posed answer.
+circuit Relation {
+    public a: field;
+    public b: field;
+
+    assert a * b == 12;
+}

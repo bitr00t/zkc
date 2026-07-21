@@ -1,0 +1,13 @@
+// Rejected: `advice` is the one construct that can silently make a circuit
+// unsound, so it may only appear inside a `gadget` block. Writing it has to
+// be a deliberate, greppable act — not something that slips into ordinary
+// circuit code during a refactor.
+circuit AdviceOutsideGadget {
+    private x: field;
+    output out: field;
+
+    advice inv = inv_or_zero(x);
+
+    assert x * inv == 1 - out;
+    assert x * out == 0;
+}

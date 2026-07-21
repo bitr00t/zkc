@@ -1,12 +1,12 @@
 // c = (a * b)^2, with a and b secret.
 //
 // No advice anywhere: every wire is computed *and* constrained by `let`,
-// so this circuit is sound by construction. Note also that the compiler
-// shares the repeated `a * b` (CSE) — check the optimizer line.
+// so this circuit is sound by construction. The determinacy pass proves
+// `c` determined immediately, without needing a single case split.
 circuit MulSquare {
     private a: field;
     private b: field;
-    public c: field;
+    output c: field;
 
     let ab = a * b;
     assert c == ab * ab;
