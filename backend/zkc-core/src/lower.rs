@@ -21,7 +21,7 @@
 //! phase-2 determinacy pass must prove is subsequently pinned down.
 
 use crate::field::ZkField;
-use crate::ir::{Ir, NodeOp, Visibility};
+use crate::ir::{Ir, NodeOp};
 use crate::r1cs::{Constraint, Lc, R1cs};
 
 pub fn lower<F: ZkField>(ir: &Ir) -> Result<R1cs<F>, String> {
@@ -36,7 +36,7 @@ pub fn lower<F: ZkField>(ir: &Ir) -> Result<R1cs<F>, String> {
     for input in &ir.inputs {
         let var = var_to_wire.len();
         var_to_wire.push(Some(input.wire));
-        if input.visibility == Visibility::Public {
+        if input.visibility.is_public() {
             public_vars.push(var);
         }
         lcs[input.wire as usize] = Lc::var(var);

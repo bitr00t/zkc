@@ -8,13 +8,27 @@
 use serde::Deserialize;
 use std::collections::HashSet;
 
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
     Private,
+    /// A verifier-visible *input*. The prover supplies it; nothing requires
+    /// it to be determined by anything else.
     Public,
+    /// A verifier-visible value the circuit *computes*. The frontend has
+    /// proved it is a function of the inputs — see [`Determinacy`].
+    Output,
+}
+
+impl Visibility {
+    /// Both `Public` and `Output` end up in the verifier's public input
+    /// vector; they differ only in the proof obligation the frontend
+    /// discharged, which is a frontend concern.
+    pub fn is_public(self) -> bool {
+        matches!(self, Visibility::Public | Visibility::Output)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +36,8 @@ pub struct Input {
     pub wire: u32,
     pub name: String,
     pub visibility: Visibility,
+    #[serde(default)]
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -32,14 +48,24 @@ pub enum HintKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag="op", rename_all = "lowercase")]
+#[serde(tag = "op", rename_all = "lowercase")]
 pub enum NodeOp {
     Const { value: String },
     Add { args: Vec<u32> },
     Sub { args: Vec<u32> },
     Mul { args: Vec<u32> },
     Neg { args: Vec<u32> },
-    Hint { hint: HintKind, name: String, args: Vec<u32> },
+    Hint {
+        hint: HintKind,
+        name: String,
+        /// Which `gadget` block the advice was quarantined in. Advice is
+        /// illegal outside one, so every hint has a gadget to point at.
+        #[serde(default)]
+        gadget: String,
+        #[serde(default)]
+        line: u32,
+        args: Vec<u32>,
+    },
 }
 
 impl NodeOp {
@@ -47,7 +73,7 @@ impl NodeOp {
         match self {
             NodeOp::Const { .. } => &[],
             NodeOp::Add { args }
-            | NodeOp::Sub { args } 
+            | NodeOp::Sub { args }
             | NodeOp::Mul { args }
             | NodeOp::Neg { args }
             | NodeOp::Hint { args, .. } => args,
@@ -66,8 +92,34 @@ impl NodeOp {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Node {
     pub wire: u32,
+    /// Whether this wire's value depends, transitively, on a hint.
+    ///
+    /// This is the frontend's *syntactic* taint, not a soundness verdict: a
+    /// tainted wire may be perfectly determined. Kept because it is useful
+    /// for diagnostics and for future arithmetization choices.
+    #[serde(default)]
+    pub advice_derived: bool,
     #[serde(flatten)]
     pub op: NodeOp,
+}
+
+/// The frontend's determinacy proof, carried inside the artifact.
+///
+/// This is the point of schema v2. Soundness is not a property of "we used a
+/// good compiler" — it is a claim about *this* circuit, so it travels with
+/// it, and the backend refuses to prove anything whose obligations were not
+/// discharged. A hand-written or tampered IR cannot skip the check by simply
+/// omitting the record: `serde` defaults `proved` to false.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Determinacy {
+    #[serde(default)]
+    pub proved: bool,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// The case splits the proof rested on, rendered for humans
+    /// (e.g. `["x != 0"]`).
+    #[serde(default)]
+    pub branches: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +139,8 @@ pub struct Ir {
     pub inputs: Vec<Input>,
     pub nodes: Vec<Node>,
     pub assertions: Vec<Assertion>,
+    #[serde(default)]
+    pub determinacy: Determinacy,
 }
 
 impl Ir {
@@ -107,6 +161,16 @@ impl Ir {
             return Err(format!(
                 "unsupported IR schema version {} (this backend speaks {})",
                 self.schema_version, SUPPORTED_SCHEMA_VERSION
+            ));
+        }
+        // The soundness gate. An IR whose outputs were not proved determined
+        // describes a circuit where the prover may choose what to prove, so
+        // there is no honest reason to build a proving key for it.
+        if !self.determinacy.proved && self.inputs.iter().any(|i| i.visibility == Visibility::Output) {
+            return Err(format!(
+                "circuit '{}' declares outputs but carries no discharged determinacy proof; \
+                 refusing to prove it (recompile with a frontend that proves determinacy)",
+                self.name
             ));
         }
         if self.const_one_wire != 0 {

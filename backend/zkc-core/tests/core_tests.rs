@@ -17,25 +17,39 @@ use zkc_core::witness::{solve, SolveInputs};
 // --- Fixtures ------------------------------------------------------------
 
 const ISZERO_IR: &str = r#"{
-  "schema_version": 1, "name": "IsZero", "field": "bn254", "const_one_wire": 0,
+  "schema_version": 2, "name": "IsZero", "field": "bn254", "const_one_wire": 0,
   "inputs": [
     {"wire": 1, "name": "x", "visibility": "private"},
-    {"wire": 2, "name": "out", "visibility": "public"}],
+    {"wire": 2, "name": "out", "visibility": "output", "line": 21}],
   "nodes": [
-    {"wire": 3, "op": "hint", "hint": "inv_or_zero", "name": "inv", "args": [1]},
-    {"wire": 4, "op": "mul", "args": [1, 3]},
-    {"wire": 5, "op": "const", "value": "1"},
-    {"wire": 6, "op": "sub", "args": [5, 2]},
-    {"wire": 7, "op": "mul", "args": [1, 2]},
-    {"wire": 8, "op": "const", "value": "0"}],
+    {"wire": 3, "advice_derived": true, "op": "hint", "hint": "inv_or_zero",
+     "name": "inv", "gadget": "is_zero", "line": 24, "args": [1]},
+    {"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]},
+    {"wire": 5, "advice_derived": false, "op": "const", "value": "1"},
+    {"wire": 6, "advice_derived": false, "op": "sub", "args": [5, 2]},
+    {"wire": 7, "advice_derived": false, "op": "mul", "args": [1, 2]},
+    {"wire": 8, "advice_derived": false, "op": "const", "value": "0"}],
   "assertions": [
-    {"lhs": 4, "rhs": 6, "label": "(x * inv) == (1 - out)", "line": 17},
-    {"lhs": 7, "rhs": 8, "label": "(x * out) == 0", "line": 18}]
+    {"lhs": 4, "rhs": 6, "label": "(x * inv) == (1 - out)", "line": 26},
+    {"lhs": 7, "rhs": 8, "label": "(x * out) == 0", "line": 27}],
+  "determinacy": {"proved": true, "targets": ["out"],
+                  "branches": [["x == 0"], ["x != 0"]]}
 }"#;
 
 /// The same circuit with the second assertion (and its nodes) removed.
+///
+/// The phase-2 frontend refuses to compile this, so it can only be written
+/// by hand — which is exactly why it belongs here. It pins down the fact
+/// that the *constraint system* really does admit two witnesses: the
+/// frontend check is preventing a real vulnerability, not a theoretical one.
+///
+/// Note `out` is declared `public`, not `output`. As a relation ("I know x
+/// and out satisfying this equation") the circuit is not lying about
+/// anything, so the backend's soundness gate has nothing to object to. It is
+/// the claim that `out` is *computed* that needs a proof — see
+/// `an_ir_claiming_outputs_without_a_proof_is_refused`.
 const ISZERO_BROKEN_IR: &str = r#"{
-  "schema_version": 1, "name": "IsZeroBroken", "field": "bn254", "const_one_wire": 0,
+  "schema_version": 2, "name": "IsZeroBroken", "field": "bn254", "const_one_wire": 0,
   "inputs": [
     {"wire": 1, "name": "x", "visibility": "private"},
     {"wire": 2, "name": "out", "visibility": "public"}],
@@ -51,17 +65,18 @@ const ISZERO_BROKEN_IR: &str = r#"{
 /// Only linear operations, so lowering should emit no multiplication
 /// constraints at all — one constraint per assertion and nothing else.
 const LINEAR_IR: &str = r#"{
-  "schema_version": 1, "name": "Linear", "field": "bn254", "const_one_wire": 0,
+  "schema_version": 2, "name": "Linear", "field": "bn254", "const_one_wire": 0,
   "inputs": [
     {"wire": 1, "name": "a", "visibility": "private"},
-    {"wire": 2, "name": "z", "visibility": "public"}],
+    {"wire": 2, "name": "z", "visibility": "output", "line": 3}],
   "nodes": [
     {"wire": 3, "op": "const", "value": "3"},
     {"wire": 4, "op": "add", "args": [1, 3]},
     {"wire": 5, "op": "neg", "args": [4]},
     {"wire": 6, "op": "sub", "args": [1, 5]}],
   "assertions": [
-    {"lhs": 2, "rhs": 6, "label": "z == a - (-(a + 3))", "line": 5}]
+    {"lhs": 2, "rhs": 6, "label": "z == a - (-(a + 3))", "line": 5}],
+  "determinacy": {"proved": true, "targets": ["z"], "branches": [[]]}
 }"#;
 
 fn inputs(pairs: &[(&str, &str)]) -> HashMap<String, Fr> {
@@ -115,7 +130,7 @@ fn valid_ir_loads() {
 
 #[test]
 fn rejects_a_future_schema_version() {
-    let text = ISZERO_IR.replace("\"schema_version\": 1", "\"schema_version\": 99");
+    let text = ISZERO_IR.replace("\"schema_version\": 2", "\"schema_version\": 99");
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("unsupported IR schema version"), "{message}");
 }
@@ -125,8 +140,8 @@ fn rejects_forward_references() {
     // A node that reads a wire defined later would break the solver, so the
     // topological-order invariant is checked, not assumed.
     let text = ISZERO_IR.replace(
-        r#"{"wire": 4, "op": "mul", "args": [1, 3]}"#,
-        r#"{"wire": 4, "op": "mul", "args": [1, 7]}"#,
+        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]}"#,
+        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 7]}"#,
     );
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("topologically ordered"), "{message}");
@@ -135,16 +150,42 @@ fn rejects_forward_references() {
 #[test]
 fn rejects_wrong_arity() {
     let text = ISZERO_IR.replace(
-        r#"{"wire": 4, "op": "mul", "args": [1, 3]}"#,
-        r#"{"wire": 4, "op": "mul", "args": [1]}"#,
+        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]}"#,
+        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1]}"#,
     );
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("expected 2"), "{message}");
 }
 
 #[test]
+fn an_ir_claiming_outputs_without_a_proof_is_refused() {
+    // Schema v2 carries the frontend's determinacy proof inside the artifact,
+    // and the backend treats a missing proof as a refusal rather than a
+    // default-allow. Stripping the record from an otherwise valid IR must not
+    // be a way to get a proving key for an under-constrained circuit.
+    let text = ISZERO_IR.replace(
+        r#""determinacy": {"proved": true, "targets": ["out"],
+                  "branches": [["x == 0"], ["x != 0"]]}"#,
+        r#""determinacy": {"proved": false, "targets": [], "branches": []}"#,
+    );
+    let message = Ir::from_json(&text).unwrap_err();
+    assert!(message.contains("determinacy"), "{message}");
+}
+
+#[test]
+fn a_relation_without_outputs_needs_no_determinacy_proof() {
+    // Not every circuit computes something. A relation over public inputs has
+    // no output to pin down, so the gate must stay quiet rather than demand a
+    // proof that does not apply.
+    let ir = Ir::from_json(ISZERO_BROKEN_IR).unwrap();
+    assert!(!ir.determinacy.proved);
+    assert_eq!(ir.name, "IsZeroBroken");
+}
+
+#[test]
 fn rejects_sparse_wire_numbering() {
-    let text = ISZERO_IR.replace(r#""wire": 5, "op": "const""#, r#""wire": 50, "op": "const""#);
+    let text = ISZERO_IR.replace(r#""wire": 5, "advice_derived": false, "op": "const""#,
+                      r#""wire": 50, "advice_derived": false, "op": "const""#);
     assert!(Ir::from_json(&text).is_err());
 }
 
@@ -189,7 +230,7 @@ fn assertion_violations_report_the_source_line() {
     let ir = Ir::from_json(ISZERO_IR).unwrap();
     let (_, violated) = run(&ir, &[("x", "5"), ("out", "1")], &[]);
     assert!(
-        violated.iter().any(|origin| origin.contains("line 17")),
+        violated.iter().any(|origin| origin.contains("line 26")),
         "expected the source-level origin, got {violated:?}"
     );
 }

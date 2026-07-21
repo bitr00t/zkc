@@ -7,7 +7,7 @@
 //! because everything upstream stops at the arithmetization-neutral IR.
 
 use ark_ff::PrimeField;
-use ark_relations::R1CS::{
+use ark_relations::r1cs::{
     ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
 };
 

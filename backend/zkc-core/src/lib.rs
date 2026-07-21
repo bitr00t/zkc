@@ -13,4 +13,3 @@ pub mod witness;
 
 pub use field::ZkField;
 pub use ir::Ir;
-

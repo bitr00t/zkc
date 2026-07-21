@@ -79,6 +79,13 @@ impl<F: PrimeField> ZkField for F {
         ark_ff::Field::inverse(&self)
     }
     fn from_u64(value: u64) -> Self {
+        // Fully qualified on purpose. Inside this blanket impl `F::from` has
+        // two candidates: `From<u64> for F` (via arkworks' `Field`) and the
+        // reflexive `impl<T> From<T> for T`. rustc disambiguates them from the
+        // argument type, but the ambiguity is real and rust-analyzer resolves
+        // it the other way, reporting a phantom "expected F, found u64".
+        // Naming the impl costs nothing and matches how `zero`, `one` and
+        // `inverse` above avoid recursing into this very trait.
         <F as From<u64>>::from(value)
     }
     fn to_decimal(self) -> String {
