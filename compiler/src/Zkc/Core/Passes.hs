@@ -84,7 +84,7 @@ mapArgs f op = case op of
   OSub a b   -> OSub (f a) (f b)
   OMul a b   -> OMul (f a) (f b)
   ONeg a     -> ONeg (f a)
-  OHint k n as -> OHint k n (map f as)
+  OHint info as -> OHint info (map f as)
 
 -- | Fold when every operand is a known constant. Hints never fold.
 constFold :: Acc -> Op -> Maybe Integer
@@ -94,7 +94,7 @@ constFold acc op = case op of
   OSub a b -> (-) <$> known a <*> known b
   OMul a b -> (*) <$> known a <*> known b
   ONeg a   -> negate <$> known a
-  OHint _ _ _ -> Nothing
+  OHint _ _ -> Nothing
   where
     known w = Map.lookup w (accConsts acc)
 

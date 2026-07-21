@@ -4,52 +4,52 @@
 --
 -- @
 --   circuit  ::= 'circuit' Ident '{' param* stmt* '}'
---   param    ::= ('private' | 'public') Ident ':' 'field' ';'
+--   param    ::= ('private' | 'public' | 'output') Ident ':' 'field' ';'
 --   stmt     ::= 'let' Ident '=' expr ';'
---              | 'advice' Ident '=' hint ';'
+--              | 'advice' Ident '=' hint ';'          -- only inside a gadget
 --              | 'assert' expr '==' expr ';'
+--              | 'gadget' Ident '{' stmt* '}'
 --   hint     ::= ('inv_or_zero' | 'inv') '(' expr ')'
 --   expr     ::= term (('+' | '-') term)*
 --   term     ::= factor ('*' factor)*
 --   factor   ::= Number | Ident | '(' expr ')' | '-' factor
 -- @
 --
--- Error messages carry the source line and say what was expected — error
--- quality is a stated goal of this compiler, so it starts here rather than
--- being retrofitted.
+-- Two additions since phase 1: the @output@ role, which is what makes
+-- \"determined by the inputs\" a well-posed question, and @gadget@ blocks,
+-- which quarantine raw advice.
 module Zkc.Syntax.Parser (parseCircuit) where
 
+import Zkc.Diagnostics
 import Zkc.Syntax.Ast
 import Zkc.Syntax.Lexer
 
 -- | Parse a whole source file into a circuit.
-parseCircuit :: String -> Either String Circuit
+parseCircuit :: String -> Either Diagnostic Circuit
 parseCircuit source = do
   tokens <- lexer source
   (circuit, rest) <- pCircuit tokens
   case rest of
     (Token TEof _ : _) -> Right circuit
-    (Token t l : _) -> Left $ err l ("unexpected " ++ describeTok t ++ " after the circuit body")
+    (Token t l : _) ->
+      Left $ diagAt l ("unexpected " ++ describeTok t ++ " after the circuit body")
     [] -> Right circuit
 
-type P a = [Token] -> Either String (a, [Token])
-
-err :: Int -> String -> String
-err line message = "line " ++ show line ++ ": " ++ message
+type P a = [Token] -> Either Diagnostic (a, [Token])
 
 expect :: Tok -> String -> P ()
 expect want context (Token got line : rest)
   | got == want = Right ((), rest)
-  | otherwise = Left $ err line $
+  | otherwise = Left $ diagAt line $
       "expected " ++ describeTok want ++ " " ++ context
       ++ ", found " ++ describeTok got
-expect want _ [] = Left $ "unexpected end of input, expected " ++ describeTok want
+expect want _ [] = Left $ diag ("unexpected end of input, expected " ++ describeTok want)
 
 pIdent :: String -> P (String, Int)
 pIdent _ (Token (TIdent name) line : rest) = Right ((name, line), rest)
 pIdent context (Token got line : _) =
-  Left $ err line $ "expected " ++ context ++ ", found " ++ describeTok got
-pIdent context [] = Left $ "unexpected end of input, expected " ++ context
+  Left $ diagAt line ("expected " ++ context ++ ", found " ++ describeTok got)
+pIdent context [] = Left $ diag ("unexpected end of input, expected " ++ context)
 
 pCircuit :: P Circuit
 pCircuit tokens0 = do
@@ -66,6 +66,7 @@ pParams :: P [ParamDecl]
 pParams tokens = case tokens of
   (Token TPrivate line : rest) -> one Private line rest
   (Token TPublic line : rest) -> one Public line rest
+  (Token TOutput line : rest) -> one Output line rest
   _ -> Right ([], tokens)
   where
     one visibility line rest = do
@@ -102,6 +103,14 @@ pStmts tokens = case tokens of
     (more, t5) <- pStmts t4
     Right (SAssert lhs rhs line : more, t5)
 
+  (Token TGadget line : rest) -> do
+    ((name, _), t1) <- pIdent "a gadget name" rest
+    ((), t2) <- expect TLBrace "after the gadget name" t1
+    (body, t3) <- pStmts t2
+    ((), t4) <- expect TRBrace "to close the gadget block" t3
+    (more, t5) <- pStmts t4
+    Right (SGadget name body line : more, t5)
+
   _ -> Right ([], tokens)
 
 pHint :: P Hint
@@ -112,18 +121,18 @@ pHint (Token (TIdent name) line : rest) = do
   build <- case name of
     "inv_or_zero" -> Right HintInvOrZero
     "inv" -> Right HintInv
-    _ -> Left $ err line $
+    _ -> Left $ diagAt line $
       "'" ++ name ++ "' is not a known hint; the right-hand side of 'advice' "
-      ++ "must be a hint call (phase 1 provides 'inv_or_zero' and 'inv')"
+      ++ "must be a hint call (phase 2 provides 'inv_or_zero' and 'inv')"
   ((), t1) <- expect TLParen ("after hint '" ++ name ++ "'") rest
   (argument, t2) <- pExpr t1
   ((), t3) <- expect TRParen "to close the hint argument" t2
   Right (build argument, t3)
 pHint (Token got line : _) =
-  Left $ err line $
+  Left $ diagAt line $
     "the right-hand side of 'advice' must be a hint call, found " ++ describeTok got
     ++ " (only hints may produce unconstrained values)"
-pHint [] = Left "unexpected end of input in advice binding"
+pHint [] = Left $ diag "unexpected end of input in advice binding"
 
 pExpr :: P Expr
 pExpr tokens = do
@@ -160,5 +169,5 @@ pFactor tokens = case tokens of
     ((), t2) <- expect TRParen "to close the parenthesised expression" t1
     Right (inner, t2)
   (Token got line : _) ->
-    Left $ err line $ "expected an expression, found " ++ describeTok got
-  [] -> Left "unexpected end of input in expression"
+    Left $ diagAt line ("expected an expression, found " ++ describeTok got)
+  [] -> Left $ diag "unexpected end of input in expression"

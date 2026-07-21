@@ -17,6 +17,7 @@ module Zkc.Core.Ir
   , Visibility(..)
   , IrInput(..)
   , HintKind(..)
+  , HintInfo(..)
   , Op(..)
   , Node(..)
   , Assertion(..)
@@ -24,7 +25,12 @@ module Zkc.Core.Ir
   , constOneWire
   , opArgs
   , isHint
+  , adviceWires
+  , adviceDerived
   ) where
+
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 import Zkc.Syntax.Ast (Visibility(..))
 
@@ -38,10 +44,23 @@ data IrInput = IrInput
   { iiWire :: WireId
   , iiName :: String
   , iiVisibility :: Visibility
+  , iiLine :: Int          -- ^ where it was declared, for diagnostics
   } deriving (Eq, Show)
 
 data HintKind = KInvOrZero | KInv
   deriving (Eq, Ord, Show)
+
+-- | Everything a hint node carries besides its arguments.
+--
+-- The gadget name is not decoration: raw advice is only legal inside a
+-- @gadget@ block, so recording which one a hint came from lets diagnostics
+-- point at the quarantined region that owes the proof obligation.
+data HintInfo = HintInfo
+  { hiKind :: HintKind
+  , hiName :: String     -- ^ source-level advice name
+  , hiGadget :: String   -- ^ the enclosing gadget block
+  , hiLine :: Int
+  } deriving (Eq, Ord, Show)
 
 data Op
   = OConst Integer
@@ -52,10 +71,10 @@ data Op
   -- | A value the witness generator computes but that no constraint yet
   -- pins down. Every hint is a proof obligation: phase 2's determinacy pass
   -- must show that the assertions determine it uniquely.
-  -- | Carries the source-level advice name so backends and error
-  -- messages can talk about @inv@ rather than @wire 3@ — and so a prover
-  -- can explicitly override it (which is exactly what an attacker does).
-  | OHint HintKind String [WireId]
+  -- | A value the witness generator computes but that no constraint pins
+  -- down on its own. Every hint is a proof obligation: the determinacy pass
+  -- must show the assertions leave the circuit's outputs unique anyway.
+  | OHint HintInfo [WireId]
   deriving (Eq, Ord, Show)
 
 data Node = Node
@@ -85,8 +104,27 @@ opArgs op = case op of
   OSub a b   -> [a, b]
   OMul a b   -> [a, b]
   ONeg a     -> [a]
-  OHint _ _ as -> as
+  OHint _ as -> as
 
 isHint :: Op -> Bool
-isHint (OHint _ _ _) = True
+isHint (OHint _ _) = True
 isHint _ = False
+
+-- | Advice wires, paired with their hint metadata.
+adviceWires :: Ir -> [(WireId, HintInfo)]
+adviceWires ir =
+  [ (nWire n, info) | n <- irNodes ir, OHint info _ <- [nOp n] ]
+
+-- | Wires whose value depends, transitively, on a hint.
+--
+-- This is the *syntactic* taint, and it is deliberately distinct from
+-- determinacy. A tainted wire may still be perfectly determined (@inv@ is,
+-- whenever @x /= 0@), and an untainted one is determined by construction.
+-- Conflating the two is what makes naive checkers reject correct circuits.
+adviceDerived :: Ir -> Set.Set WireId
+adviceDerived ir = foldl step Set.empty (irNodes ir)
+  where
+    step tainted node
+      | isHint (nOp node) = Set.insert (nWire node) tainted
+      | any (`Set.member` tainted) (opArgs (nOp node)) = Set.insert (nWire node) tainted
+      | otherwise = tainted

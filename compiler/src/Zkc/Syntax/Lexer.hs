@@ -12,12 +12,14 @@ module Zkc.Syntax.Lexer
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 
+import Zkc.Diagnostics (Diagnostic, diagAt)
+
 -- | A token plus the line it was found on (for error messages).
 data Token = Token { tokKind :: Tok, tokLine :: Int }
   deriving (Eq, Show)
 
 data Tok
-  = TCircuit | TPrivate | TPublic | TField
+  = TCircuit | TPrivate | TPublic | TOutput | TField | TGadget
   | TLet | TAdvice | TAssert
   | TIdent String
   | TNumber Integer
@@ -34,6 +36,8 @@ describeTok t = case t of
   TCircuit  -> "'circuit'"
   TPrivate  -> "'private'"
   TPublic   -> "'public'"
+  TOutput   -> "'output'"
+  TGadget   -> "'gadget'"
   TField    -> "'field'"
   TLet      -> "'let'"
   TAdvice   -> "'advice'"
@@ -55,11 +59,11 @@ describeTok t = case t of
   TArrow    -> "'->'"
   TEof      -> "end of input"
 
--- | Tokenize, or fail with a line-annotated message.
-lexer :: String -> Either String [Token]
+-- | Tokenize, or fail with a line-annotated diagnostic.
+lexer :: String -> Either Diagnostic [Token]
 lexer = go 1
   where
-    go :: Int -> String -> Either String [Token]
+    go :: Int -> String -> Either Diagnostic [Token]
     go line [] = Right [Token TEof line]
     go line s@(c:cs)
       | c == '\n' = go (line + 1) cs
@@ -78,6 +82,8 @@ lexer = go 1
       "circuit" -> TCircuit
       "private" -> TPrivate
       "public"  -> TPublic
+      "output"  -> TOutput
+      "gadget"  -> TGadget
       "field"   -> TField
       "let"     -> TLet
       "advice"  -> TAdvice
@@ -98,6 +104,5 @@ lexer = go 1
       ('-':rest)     -> (Token TMinus line :)  <$> go line rest
       ('*':rest)     -> (Token TStar line :)   <$> go line rest
       ('=':rest)     -> (Token TEq line :)     <$> go line rest
-      (c:_)          -> Left $ "line " ++ show line
-                            ++ ": unexpected character " ++ show c
+      (c:_)          -> Left $ diagAt line ("unexpected character " ++ show c)
       []             -> go line []
