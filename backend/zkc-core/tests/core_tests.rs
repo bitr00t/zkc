@@ -12,7 +12,7 @@ use ark_bn254::Fr;
 use zkc_core::field::ZkField;
 use zkc_core::ir::Ir;
 use zkc_core::lower::{lower, lower_with};
-use zkc_core::plonkish::lower_plonkish;
+use zkc_core::plonkish::{lower_plonkish, lower_plonkish_with};
 use zkc_core::witness::{solve, SolveInputs};
 
 // --- Fixtures ------------------------------------------------------------
@@ -97,6 +97,11 @@ const MULSQUARE_IR: &str = r#"{
     {"lhs": 3, "rhs": 5, "label": "c == (a * b) * (a * b)", "line": 6}],
   "determinacy": {"proved": true, "targets": ["c"], "branches": [[]]}
 }"#;
+
+
+/// `z == a + b + c + d + e + f`. No multiplication at all — the shape where
+/// R1CS's free linear algebra wins and no amount of gate fusion can catch up.
+const WIDESUM_IR: &str = r##"{"schema_version": 2, "name": "WideSum", "field": "bn254", "const_one_wire": 0, "inputs": [{"wire": 1, "name": "a", "visibility": "private", "line": 2}, {"wire": 2, "name": "b", "visibility": "private", "line": 2}, {"wire": 3, "name": "c", "visibility": "private", "line": 2}, {"wire": 4, "name": "d", "visibility": "private", "line": 3}, {"wire": 5, "name": "e", "visibility": "private", "line": 3}, {"wire": 6, "name": "f", "visibility": "private", "line": 3}, {"wire": 7, "name": "z", "visibility": "output", "line": 4}], "nodes": [{"wire": 8, "advice_derived": false, "op": "add", "args": [1, 2]}, {"wire": 9, "advice_derived": false, "op": "add", "args": [8, 3]}, {"wire": 10, "advice_derived": false, "op": "add", "args": [9, 4]}, {"wire": 11, "advice_derived": false, "op": "add", "args": [10, 5]}, {"wire": 12, "advice_derived": false, "op": "add", "args": [11, 6]}], "assertions": [{"lhs": 7, "rhs": 12, "label": "z == (((((a + b) + c) + d) + e) + f)", "line": 5}], "determinacy": {"proved": true, "targets": ["z"], "branches": [[]]}}"##;
 
 fn inputs(pairs: &[(&str, &str)]) -> HashMap<String, Fr> {
     pairs
@@ -461,12 +466,12 @@ fn missing_input_values_are_reported_by_name() {
 // wiring is asserted rather than assumed, and an honest witness satisfies it.
 
 #[test]
-fn plonkish_gives_every_arithmetic_node_a_row_and_hints_none() {
+fn plonkish_unfused_gives_every_arithmetic_node_a_row_and_hints_none() {
     // IsZero: 2 muls, 1 sub, 2 consts, 1 hint, 2 assertions.
     // A hint imposes no identity, so it gets no row — the same reason it
     // allocates a variable and no constraint in R1CS.
     let ir = Ir::from_json(ISZERO_IR).unwrap();
-    let circuit = lower_plonkish::<Fr>(&ir).unwrap();
+    let circuit = lower_plonkish_with::<Fr>(&ir, false).unwrap();
     let arithmetic = ir
         .nodes
         .iter()
@@ -551,13 +556,13 @@ fn plonkish_binds_every_public_input_to_a_cell() {
 }
 
 #[test]
-fn plonkish_costs_more_than_r1cs_on_this_shape_and_that_is_expected() {
+fn plonkish_unfused_costs_more_than_r1cs_and_that_is_what_fusion_is_for() {
     // The unoptimised baseline the design note predicts: a row per node beats
     // nothing, and R1CS's free linear algebra wins here. Fusing assertions
     // into gates is the Plonkish-native optimisation, measured separately.
     let ir = Ir::from_json(ISZERO_IR).unwrap();
     let r1cs = lower::<Fr>(&ir).unwrap();
-    let plonkish = lower_plonkish::<Fr>(&ir).unwrap();
+    let plonkish = lower_plonkish_with::<Fr>(&ir, false).unwrap();
     println!(
         "BENCH circuit=IsZero r1cs_constraints={} plonkish_rows={} plonkish_copies={}",
         r1cs.constraints.len(),
@@ -565,4 +570,169 @@ fn plonkish_costs_more_than_r1cs_on_this_shape_and_that_is_expected() {
         plonkish.copies.len()
     );
     assert!(plonkish.num_rows() > r1cs.constraints.len());
+}
+
+// Plonkish gate fusion (phase 4, Workstream D.2) --------------------------
+
+/// Overwrite every cell holding `wire`, so the table stops describing the
+/// solved witness. Used to check that a lie is caught however it is told.
+fn falsify(circuit: &zkc_core::plonkish::Plonkish<Fr>, assignment: &mut [[Fr; 3]], wire: u32, value: &str) {
+    let lie = Fr::from_decimal(value).unwrap();
+    for (row_index, row) in circuit.rows.iter().enumerate() {
+        for (slot, held) in row.cells.iter().enumerate() {
+            if *held == Some(wire) {
+                assignment[row_index][slot] = lie;
+            }
+        }
+    }
+}
+
+#[test]
+fn fusion_folds_iszero_into_one_row_per_assertion() {
+    // `assert x * inv == 1 - out` is four rows unfused — a constant, a
+    // subtraction, a multiplication and the assertion — and one fused, because
+    // a gate holds a product, a linear term and a constant at once.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let base = lower_plonkish_with::<Fr>(&ir, false).unwrap();
+    let fused = lower_plonkish_with::<Fr>(&ir, true).unwrap();
+    assert_eq!(base.num_rows(), 7);
+    assert_eq!(fused.num_rows(), 2); // one row per assertion, nothing else
+    // Fusion also removes wiring: a value that never leaves its row needs no
+    // copy constraint, and those are a real cost in a Plonk prover.
+    assert!(fused.copies.len() < base.copies.len());
+}
+
+#[test]
+fn fusion_preserves_the_honest_witness() {
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "0"), ("out", "1")]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    for fuse in [false, true] {
+        let circuit = lower_plonkish_with::<Fr>(&ir, fuse).unwrap();
+        let assignment = circuit.assignment(&wires);
+        assert!(
+            circuit.is_satisfied(&assignment),
+            "honest witness rejected (fuse={fuse})"
+        );
+    }
+}
+
+#[test]
+fn fusion_still_catches_a_forged_output() {
+    // The rule that matters: a cheaper circuit must not be a weaker one.
+    // x = 0 forces out = 1, so claiming out = 0 is a lie, and both the fused
+    // and the unfused arrangement must refuse it.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "0"), ("out", "1")]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    let out = ir.inputs.iter().find(|i| i.name == "out").unwrap().wire;
+    for fuse in [false, true] {
+        let circuit = lower_plonkish_with::<Fr>(&ir, fuse).unwrap();
+        let mut assignment = circuit.assignment(&wires);
+        falsify(&circuit, &mut assignment, out, "0");
+        assert!(
+            !circuit.is_satisfied(&assignment),
+            "forged output accepted (fuse={fuse})"
+        );
+    }
+}
+
+#[test]
+fn fusion_shares_a_value_used_twice_instead_of_recomputing_it() {
+    // `c == (a*b) * (a*b)`: the inner product feeds two consumers, so folding
+    // it into both would compute it twice. It is materialised once and wired,
+    // which is common-subexpression elimination one arithmetization further
+    // down. The result must still be correct.
+    let ir = Ir::from_json(MULSQUARE_IR).unwrap();
+    let fused = lower_plonkish_with::<Fr>(&ir, true).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("a", "2"), ("b", "3"), ("c", "36")]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    assert!(fused.is_satisfied(&fused.assignment(&wires)));
+    // The shared inner product is wired to its second use rather than redone.
+    assert!(!fused.copies.is_empty());
+}
+
+#[test]
+fn benchmark_plonkish_fusion_and_where_r1cs_still_wins() {
+    // The headline pair. On multiplication-heavy shapes fusion closes the gap
+    // to R1CS completely; on a wide linear sum it cannot, and that is
+    // structural rather than a missing optimisation: six summands do not fit
+    // in three-cell gates, while R1CS folds them into a single linear
+    // combination for free. The two arithmetizations genuinely disagree about
+    // what is expensive, which is the reason the IR stays neutral.
+    let many = Ir::from_json(&many_products_ir(8)).unwrap();
+    let r1cs = lower::<Fr>(&many).unwrap();
+    let base = lower_plonkish_with::<Fr>(&many, false).unwrap();
+    let fused = lower_plonkish_with::<Fr>(&many, true).unwrap();
+    println!(
+        "BENCH circuit=ManyProducts n=8 r1cs={} plonkish_base={} plonkish_fused={} copies={}",
+        r1cs.constraints.len(),
+        base.num_rows(),
+        fused.num_rows(),
+        fused.copies.len()
+    );
+    assert_eq!(base.num_rows(), 16);
+    assert_eq!(fused.num_rows(), 8); // one gate per product: R1CS matched
+    assert_eq!(fused.num_rows(), r1cs.constraints.len());
+    // No value crosses a row boundary, so the wiring cost vanishes entirely.
+    assert_eq!(fused.copies.len(), 0);
+}
+
+
+#[test]
+fn a_wide_linear_sum_is_where_r1cs_stays_ahead() {
+    // Structural, not a missing optimisation. R1CS folds six summands into one
+    // linear combination and spends a single constraint; a Plonkish gate sees
+    // three cells, so the sum has to be chained across rows however cleverly
+    // it is fused. Recording it as a test keeps the claim honest.
+    let ir = Ir::from_json(WIDESUM_IR).unwrap();
+    let r1cs = lower::<Fr>(&ir).unwrap();
+    let base = lower_plonkish_with::<Fr>(&ir, false).unwrap();
+    let fused = lower_plonkish_with::<Fr>(&ir, true).unwrap();
+    println!(
+        "BENCH circuit=WideSum r1cs={} plonkish_base={} plonkish_fused={}",
+        r1cs.constraints.len(),
+        base.num_rows(),
+        fused.num_rows()
+    );
+    assert_eq!(r1cs.constraints.len(), 1);
+    assert_eq!(base.num_rows(), 6);
+    assert_eq!(fused.num_rows(), 5); // fusion helps a little, and then stops
+    assert!(fused.num_rows() > r1cs.constraints.len());
+
+    // Cheaper or not, it still has to be right.
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[
+                ("a", "1"), ("b", "2"), ("c", "3"),
+                ("d", "4"), ("e", "5"), ("f", "6"), ("z", "21"),
+            ]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    assert!(fused.is_satisfied(&fused.assignment(&wires)));
+    let z = ir.inputs.iter().find(|i| i.name == "z").unwrap().wire;
+    let mut assignment = fused.assignment(&wires);
+    falsify(&fused, &mut assignment, z, "20");
+    assert!(!fused.is_satisfied(&assignment), "a wrong sum must be rejected");
 }
