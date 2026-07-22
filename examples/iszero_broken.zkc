@@ -5,17 +5,28 @@
 //
 // In phase 2 it is a COMPILE ERROR. Try it:
 //
-//     zkc build examples/iszero_broken.zkc -o /dev/null
+//     zkc build examples/iszero_broken.zkc --no-smt -o /dev/null
 //
 // The determinacy pass splits on x, proves `out` determined when x == 0,
 // and reports that under x != 0 it is not.
+//
+// In phase 3 the compiler can do better than report. Escalate to a solver
+// and it hands back the forgery itself — two witnesses agreeing on x and
+// disagreeing on out:
+//
+//     zkc build examples/iszero_broken.zkc --smt-solver z3 --smt-dialect int
+//
+// A rejection tells you something is wrong. A refutation tells you what.
+gadget is_zero(x: field) -> (out: field) {
+    advice inv = inv_or_zero(x);
+
+    assert x * inv == 1 - out;
+    // MISSING:  assert x * out == 0;
+}
+
 circuit IsZeroBroken {
     private x: field;
     output out: field;
 
-    gadget is_zero {
-        advice inv = inv_or_zero(x);
-
-        assert x * inv == 1 - out;
-    }
+    (out) = is_zero(x);
 }

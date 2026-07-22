@@ -1,11 +1,20 @@
 // Rejected by the compiler: `ghost` is computed by a hint but no assertion
 // ever mentions it, so nothing determines its value. This is the crudest
 // form of under-constraining, and the one phase 1 already catches.
-circuit UnconstrainedAdvice {
-    private x: field;
-    public out: field;
-
+//
+// Note that the advice is properly quarantined here — it sits inside a
+// `gadget` definition, so the rule from `advice_outside_gadget.zkc` is
+// satisfied. The circuit is rejected anyway. Being allowed to write `advice`
+// is not the same as being allowed to leave it dangling.
+gadget square(x: field) -> (out: field) {
     advice ghost = inv_or_zero(x);
 
     assert out == x * x;
+}
+
+circuit UnconstrainedAdvice {
+    private x: field;
+    output out: field;
+
+    (out) = square(x);
 }
