@@ -101,10 +101,20 @@ as Workstream C did, so the win is a measured delta.
 
 ### E — Trust: checking and differential equivalence
 
-**E.1 — Satisfiability.** `Plonkish::is_satisfied(assignment)`, the analogue
-of `R1cs::is_satisfied`: every gate identity holds, and every copy constraint
-relates two cells that actually agree. Copy constraints must be checked
-explicitly, or the lowering could "succeed" while wiring nothing together.
+**E.1 — Satisfiability and well-formedness.** *Done.* Two checks, not one.
+`Plonkish::is_satisfied(assignment)` is the analogue of `R1cs::is_satisfied`:
+every gate identity holds, and every copy constraint relates two cells that
+actually agree. But that only answers "does this witness satisfy the circuit",
+and a lowering bug that wired nothing together would pass it on the honest
+witness while being silently unsound. So `Plonkish::validate()` answers the
+prior question — "is this a well-formed circuit at all" — with no witness in
+sight: selectors match their cells, every shared wire's occurrences are a
+single connected component under the copy relation, and every public input
+reaches a cell. The wiring check is the one that matters, and two tests break
+a real lowering (drop a copy constraint; switch on a selector over an empty
+cell) and require the break to be caught, because a validator that only ever
+passes is decoration. Violations describe themselves in source terms, as the
+R1CS checker does.
 
 **E.2 — Differential equivalence.** The centrepiece, and the reason this phase
 is credible. For the same IR and the **same solved witness** (the witness
