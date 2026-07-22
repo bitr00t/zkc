@@ -10,16 +10,16 @@ Two invariants hold at every phase:
 2. **Everything is generic over the field.** The field is a parameter, never
    hardcoded — BN254 for Groth16, Goldilocks for the FRI prover later.
 
-| Phase | Content | Status |
-|---|---|---|
-| 0 | Foundation spike: own field arithmetic, R1CS, satisfiability checker, and a working forgery against an under-constrained circuit | **done** |
-| 1 | Walking skeleton: source → typed IR → R1CS → witness → Groth16 proof, end to end | **done** |
-| 2 | The type system: `output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting | **done** |
-| 3 | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | next |
-| 4 | Own arithmetization: Plonkish/AIR lowering from the same Core IR | |
-| 5 | Own prover: FRI over Goldilocks, replacing arkworks | |
-| 6 | Tooling: language server, constraint-count profiler, gadget standard library | |
-| 7 | Recursion and formal verification of the lowering | |
+| Phase | Content                                                                                                                                            | Status                                                                                    |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 0     | Foundation spike: own field arithmetic, R1CS, satisfiability checker, and a working forgery against an under-constrained circuit                   | **done**                                                                            |
+| 1     | Walking skeleton: source → typed IR → R1CS → witness → Groth16 proof, end to end                                                               | **done**                                                                            |
+| 2     | The type system:`output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting                 | **done**                                                                            |
+| 3     | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | **done** (see `README.md`; the gadget stdlib and the Circom benchmark carry over) |
+| 4     | Own arithmetization: Plonkish/AIR lowering from the same Core IR                                                                                   |                                                                                           |
+| 5     | Own prover: FRI over Goldilocks, replacing arkworks                                                                                                |                                                                                           |
+| 6     | Tooling: language server, constraint-count profiler, gadget standard library                                                                       |                                                                                           |
+| 7     | Recursion and formal verification of the lowering                                                                                                  |                                                                                           |
 
 ## Phase 3 in detail
 
