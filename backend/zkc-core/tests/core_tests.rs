@@ -736,3 +736,111 @@ fn a_wide_linear_sum_is_where_r1cs_stays_ahead() {
     falsify(&fused, &mut assignment, z, "20");
     assert!(!fused.is_satisfied(&assignment), "a wrong sum must be rejected");
 }
+
+// Plonkish lowering well-formedness (phase 4, Workstream E.1) --------------
+//
+// `is_satisfied` (D.1) asks whether a witness satisfies the circuit. `validate`
+// asks the prior question — is this a well-formed circuit at all — and these
+// tests are what stop the second lowering from being trusted before it has
+// earned it. Two of them deliberately break a lowering and require the break
+// to be caught, because a validator that only ever passes is decoration.
+
+use zkc_core::plonkish::{Malformed, Column as PlonkColumn};
+
+#[test]
+fn validate_accepts_every_lowering_the_compiler_produces() {
+    for fixture in [ISZERO_IR, LINEAR_IR, MULSQUARE_IR, ISZERO_BROKEN_IR, WIDESUM_IR] {
+        let ir = Ir::from_json(fixture).unwrap();
+        for fuse in [false, true] {
+            let circuit = lower_plonkish_with::<Fr>(&ir, fuse).unwrap();
+            assert!(
+                circuit.validate().is_ok(),
+                "a real lowering was rejected as malformed (fuse={fuse}): {:?}",
+                circuit.validate()
+            );
+        }
+    }
+}
+
+#[test]
+fn validate_catches_sharing_that_was_never_wired() {
+    // The failure the design note warned about: a value used in two rows, with
+    // the copy constraint that ties them together dropped. Every gate still
+    // holds on the honest witness, so `is_satisfied` is happy — and the
+    // circuit is silently unsound, because the two occurrences are free to
+    // differ. `validate` must catch what `check` cannot.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let mut circuit = lower_plonkish_with::<Fr>(&ir, false).unwrap();
+
+    // Find a wire that really is shared, then delete its wiring.
+    let shared = circuit
+        .copies
+        .first()
+        .map(|(left, _)| circuit.rows[left.row].cells[left.column.index()].unwrap())
+        .expect("IsZero shares wires across rows");
+    circuit.copies.retain(|(left, right)| {
+        let l = circuit.rows[left.row].cells[left.column.index()];
+        let r = circuit.rows[right.row].cells[right.column.index()];
+        l != Some(shared) && r != Some(shared)
+    });
+
+    match circuit.validate() {
+        Err(problems) => assert!(
+            problems.iter().any(|p| matches!(p, Malformed::UnwiredSharing { wire, .. } if *wire == shared)),
+            "the dropped wiring was not reported: {problems:?}"
+        ),
+        Ok(()) => panic!("unwired sharing passed validation"),
+    }
+}
+
+#[test]
+fn validate_catches_a_selector_reading_an_empty_cell() {
+    // Turn on a selector whose cell is empty. The gate now reads a value that
+    // was never placed — a pure lowering bug, independent of any witness.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let mut circuit = lower_plonkish_with::<Fr>(&ir, true).unwrap();
+    // The assertion rows leave column C empty; switch on q_O there.
+    let row = circuit
+        .rows
+        .iter_mut()
+        .find(|r| r.cells[PlonkColumn::C.index()].is_none())
+        .expect("a fused assertion row has an empty C cell");
+    row.q_o = Fr::from_decimal("1").unwrap();
+
+    assert!(
+        matches!(
+            circuit.validate(),
+            Err(ref problems) if problems.iter().any(|p| matches!(p, Malformed::SelectorWithoutCell { .. }))
+        ),
+        "a selector over an empty cell was not caught"
+    );
+}
+
+#[test]
+fn a_violation_describes_itself_in_source_terms() {
+    // The R1CS checker reports a constraint by its assertion text; the
+    // Plonkish one owes the same. A forged output must produce a message that
+    // names where it went wrong, not an opaque index.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "0"), ("out", "1")]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    let circuit = lower_plonkish_with::<Fr>(&ir, true).unwrap();
+    let out = ir.inputs.iter().find(|i| i.name == "out").unwrap().wire;
+    let mut assignment = circuit.assignment(&wires);
+    falsify(&circuit, &mut assignment, out, "0");
+
+    let violations = circuit.check(&assignment);
+    assert!(!violations.is_empty());
+    let described = violations[0].describe();
+    // The origin carries the assertion's own text ("x * out").
+    assert!(
+        described.contains("row") || described.contains("cell"),
+        "unhelpful violation message: {described}"
+    );
+}

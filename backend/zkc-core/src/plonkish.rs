@@ -146,6 +146,12 @@ pub struct Plonkish<F> {
     /// Public inputs, in declaration order: the wire and the cell that carries
     /// it. The ordering is part of the contract with the verifier.
     pub public_cells: Vec<(u32, Cell)>,
+    /// Source-level names for the wires that have one — inputs and advice.
+    ///
+    /// Carried for the same reason `R1cs` carries `var_to_wire`: a violation
+    /// the user cannot trace back to their own source is barely better than a
+    /// panic inside the prover.
+    pub names: HashMap<u32, String>,
 }
 
 /// A failed check, in terms a circuit author can act on.
@@ -167,7 +173,144 @@ pub enum Violation {
     },
 }
 
+impl Violation {
+    /// A one-line, source-flavoured description — the Plonkish counterpart of
+    /// R1CS reporting a constraint by its assertion text.
+    pub fn describe(&self) -> String {
+        match self {
+            Violation::Gate { row, origin, value } => {
+                format!("gate at row {row} ({origin}) evaluates to {value}, not 0")
+            }
+            Violation::Copy { left, right, left_value, right_value } => format!(
+                "cell {}[{}] = {} but its wired copy {}[{}] = {}",
+                left.column.name(), left.row, left_value,
+                right.column.name(), right.row, right_value,
+            ),
+        }
+    }
+}
+
+/// A way the *lowering itself* is malformed — independent of any assignment.
+///
+/// `check` answers "does this witness satisfy the circuit". `validate` answers
+/// the prior question "is this even a well-formed circuit to satisfy", and the
+/// two must not be confused: a lowering bug that wired nothing together would
+/// sail through `check` on the honest witness (every gate still holds) while
+/// being silently unsound, because the copy constraints that were supposed to
+/// tie the circuit together were never emitted. This is exactly the failure
+/// the phase-4 note warned about — "the lowering could succeed while wiring
+/// nothing together" — turned into something the code can detect.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Malformed {
+    /// A cell names a row that does not exist.
+    CellOutOfRange { cell: Cell, num_rows: usize },
+    /// A selector is nonzero but the cell it multiplies is empty, so the gate
+    /// reads a value that was never placed. Always a lowering bug.
+    SelectorWithoutCell { row: usize, column: Column, origin: String },
+    /// A wire is produced (defined by a node's output cell, or supplied as an
+    /// input) and also read elsewhere, yet no copy constraint connects the two
+    /// occurrences. The value would float free: the reader is not forced to
+    /// see what the producer wrote.
+    UnwiredSharing { wire: u32, name: String, occurrences: usize },
+    /// A declared public input reaches no cell at all, so the verifier has
+    /// nothing to bind its public value to.
+    UnboundPublicInput { wire: u32, name: String },
+}
+
 impl<F: ZkField> Plonkish<F> {
+    /// Check that the lowering is well-formed, before any witness is involved.
+    ///
+    /// Everything here is a property of the rows and copy constraints alone.
+    /// It is cheap, it runs in tests against every fixture, and it is the
+    /// difference between "the checker passed" and "the checker was given a
+    /// circuit worth checking".
+    pub fn validate(&self) -> Result<(), Vec<Malformed>> {
+        let mut problems = Vec::new();
+
+        // Selectors and cells must agree: a nonzero selector on an empty cell
+        // reads an unplaced value; the q_M product needs both a and b.
+        for (index, row) in self.rows.iter().enumerate() {
+            let checks = [
+                (!row.q_l.is_zero(), Column::A),
+                (!row.q_r.is_zero(), Column::B),
+                (!row.q_o.is_zero(), Column::C),
+            ];
+            for (active, column) in checks {
+                if active && row.cells[column.index()].is_none() {
+                    problems.push(Malformed::SelectorWithoutCell {
+                        row: index,
+                        column,
+                        origin: row.origin.clone(),
+                    });
+                }
+            }
+            if !row.q_m.is_zero()
+                && (row.cells[Column::A.index()].is_none()
+                    || row.cells[Column::B.index()].is_none())
+            {
+                problems.push(Malformed::SelectorWithoutCell {
+                    row: index,
+                    column: Column::A,
+                    origin: row.origin.clone(),
+                });
+            }
+        }
+
+        // Every cell must name a real row.
+        for (left, right) in &self.copies {
+            for cell in [left, right] {
+                if cell.row >= self.rows.len() {
+                    problems.push(Malformed::CellOutOfRange {
+                        cell: *cell,
+                        num_rows: self.rows.len(),
+                    });
+                }
+            }
+        }
+
+        // The wiring invariant: any wire that lands in more than one cell must
+        // have those cells tied together by copy constraints — otherwise the
+        // occurrences are independent unknowns and the circuit is not what the
+        // IR meant. We check that each such wire's cells form a single
+        // connected component under the copy relation.
+        let mut cells_of: HashMap<u32, Vec<Cell>> = HashMap::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            for (slot, held) in row.cells.iter().enumerate() {
+                if let Some(wire) = held {
+                    let column = match slot { 0 => Column::A, 1 => Column::B, _ => Column::C };
+                    cells_of.entry(*wire).or_default().push(Cell::new(index, column));
+                }
+            }
+        }
+        for (wire, cells) in &cells_of {
+            if cells.len() < 2 {
+                continue;
+            }
+            if !connected(cells, &self.copies) {
+                problems.push(Malformed::UnwiredSharing {
+                    wire: *wire,
+                    name: self.names.get(wire).cloned().unwrap_or_else(|| format!("wire {wire}")),
+                    occurrences: cells.len(),
+                });
+            }
+        }
+
+        // Every public input must reach a cell.
+        let bound: std::collections::HashSet<u32> =
+            self.public_cells.iter().map(|(wire, _)| *wire).collect();
+        for (wire, cell) in &self.public_cells {
+            if cell.row >= self.rows.len() {
+                problems.push(Malformed::UnboundPublicInput {
+                    wire: *wire,
+                    name: self.names.get(wire).cloned().unwrap_or_else(|| format!("wire {wire}")),
+                });
+            }
+        }
+        let _ = bound;
+
+        if problems.is_empty() { Ok(()) } else { Err(problems) }
+    }
+
     pub fn num_rows(&self) -> usize {
         self.rows.len()
     }
@@ -236,6 +379,31 @@ impl<F: ZkField> Plonkish<F> {
     pub fn is_satisfied(&self, assignment: &[[F; 3]]) -> bool {
         self.check(assignment).is_empty()
     }
+}
+
+/// Do these cells form one connected component under the copy relation?
+///
+/// Union-find would be asymptotically nicer, but a gate graph's per-wire cell
+/// count is tiny, and a transitive closure over the relevant copies is easier
+/// to read and obviously correct.
+fn connected(cells: &[Cell], copies: &[(Cell, Cell)]) -> bool {
+    let mut reached = vec![cells[0]];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (left, right) in copies {
+            let has_left = reached.contains(left);
+            let has_right = reached.contains(right);
+            if has_left && !has_right && cells.contains(right) {
+                reached.push(*right);
+                changed = true;
+            } else if has_right && !has_left && cells.contains(left) {
+                reached.push(*left);
+                changed = true;
+            }
+        }
+    }
+    cells.iter().all(|cell| reached.contains(cell))
 }
 
 /// Lower with gate fusion enabled (the default).
@@ -339,7 +507,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
 /// wiring, which is one fewer way for the fused version to be subtly wrong.
 fn finish<F: ZkField>(mut rows: Vec<Row<F>>, ir: &Ir) -> Plonkish<F> {
     let mut wire_cells: HashMap<u32, Vec<Cell>> = HashMap::new();
-    let mut record = |rows: &Vec<Row<F>>, cells: &mut HashMap<u32, Vec<Cell>>| {
+    let record = |rows: &Vec<Row<F>>, cells: &mut HashMap<u32, Vec<Cell>>| {
         cells.clear();
         for (index, row) in rows.iter().enumerate() {
             for (slot, wire) in row.cells.iter().enumerate() {
@@ -393,7 +561,16 @@ fn finish<F: ZkField>(mut rows: Vec<Row<F>>, ir: &Ir) -> Plonkish<F> {
         .map(|input| (input.wire, wire_cells[&input.wire][0]))
         .collect();
 
-    Plonkish { rows, copies, public_cells }
+    let mut names: HashMap<u32, String> = ir
+        .inputs
+        .iter()
+        .map(|input| (input.wire, input.name.clone()))
+        .collect();
+    for (wire, name) in ir.advice_wires() {
+        names.insert(wire, name.to_string());
+    }
+
+    Plonkish { rows, copies, public_cells, names }
 }
 
 /// Gate fusion — the Plonkish-native constraint-count optimisation.
@@ -781,7 +958,15 @@ mod fuse {
             for wire in pending {
                 emitted.insert(wire);
                 let expr = fuser.node_gate(wire)?;
-                node_rows.push((wire, expr.to_row(format!("wire {wire}"))));
+                let kind = match fuser.nodes[&wire].op {
+                    NodeOp::Const { .. } => "const",
+                    NodeOp::Add { .. } => "add",
+                    NodeOp::Sub { .. } => "sub",
+                    NodeOp::Mul { .. } => "mul",
+                    NodeOp::Neg { .. } => "neg",
+                    NodeOp::Hint { .. } => "hint",
+                };
+                node_rows.push((wire, expr.to_row(format!("intermediate {kind} at wire {wire}"))));
             }
         }
 
