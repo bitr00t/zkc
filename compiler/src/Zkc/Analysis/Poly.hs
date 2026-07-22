@@ -28,6 +28,7 @@ module Zkc.Analysis.Poly
   , monomialCount
   , isSingleMonomialIn
   , render
+  , terms
   ) where
 
 import Data.List (intercalate, sortOn)
@@ -106,6 +107,16 @@ splitLinear p atom (Poly a)
 
 monomialCount :: Poly -> Int
 monomialCount (Poly a) = Map.size a
+
+-- | The polynomial as a list of @(monomial, coefficient)@ pairs, in a
+-- canonical order.
+--
+-- The representation is otherwise private, but a consumer that has to
+-- /re-express/ the polynomial in another language — the SMT backend emitting
+-- SMT-LIB2 — needs the terms themselves, and reconstructing them through the
+-- arithmetic API would be both lossy and absurd.
+terms :: Poly -> [(Mono, Integer)]
+terms (Poly a) = Map.toList a
 
 -- | True when the polynomial is a single monomial all of whose atoms are in
 -- the given set. Used to decide \"this coefficient is nonzero\": a product of
