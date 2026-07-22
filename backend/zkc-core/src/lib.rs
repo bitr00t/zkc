@@ -8,6 +8,7 @@
 pub mod field;
 pub mod ir;
 pub mod lower;
+pub mod plonkish;
 pub mod r1cs;
 pub mod witness;
 
