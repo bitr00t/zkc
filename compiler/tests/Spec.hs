@@ -11,6 +11,8 @@ import System.IO (hSetEncoding, stdout, utf8)
 
 import Zkc.Analysis.Determinacy
 import qualified Zkc.Analysis.Poly as P
+import Zkc.Analysis.Smt
+  ( Dialect(..), Query(..), SolverAnswer(..), buildQuery, parseAnswer )
 import Zkc.Core.Elaborate (elaborate, Elaborated(..))
 import Zkc.Core.Ir
 import Zkc.Core.Passes (optimize, Stats(..))
@@ -63,7 +65,42 @@ determinacyOf source = do
 checkProgramOf :: String -> Either Diagnostic (Either Failure Report)
 checkProgramOf source = do
   e <- elab source
-  pure (checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e))
+  pure (either (Left . pfFailure) Right
+          (checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e)))
+
+-- | The failing scope, for tests about /where/ an obligation stayed open.
+scopeOfFailure :: String -> Maybe (String, Bool)
+scopeOfFailure source = case elab source of
+  Right e -> case checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e) of
+    Left problem -> Just (pfScope problem, pfIsGadget problem)
+    Right _ -> Nothing
+  Left _ -> Nothing
+
+-- Helpers for the SMT layer ---------------------------------------------
+
+circuitBodyOf :: String -> Maybe Body
+circuitBodyOf source = either (const Nothing) (Just . elabCircuitBody) (elab source)
+
+gadgetBodyOf :: String -> String -> Maybe Body
+gadgetBodyOf source name = case elab source of
+  Right e -> lookup name [ (gdName d, b) | (d, b) <- elabGadgetBodies e ]
+  Left _ -> Nothing
+
+systemFor :: Body -> Maybe BodySystem
+systemFor body = either (const Nothing) Just (bodySystem bn254 body)
+
+-- | The SMT-LIB2 text for a scope, in the given dialect.
+queryFor :: Dialect -> String -> Body -> Maybe String
+queryFor dialect scope body = (qText . buildQuery bn254 dialect scope) <$> systemFor body
+
+-- | Count non-overlapping occurrences of a needle.
+occurrences :: String -> String -> Int
+occurrences needle haystack =
+  length [ () | suffix <- tails' haystack, needle `isPrefixOf'` suffix ]
+  where
+    tails' [] = [[]]
+    tails' s@(_ : rest) = s : tails' rest
+    isPrefixOf' p s = take (length p) s == p
 
 -- | True when compilation fails with a diagnostic mentioning the needle
 -- anywhere: message, notes or suggestion.
@@ -612,6 +649,93 @@ cases =
 
   , ( "json: assertion labels keep the source text for backend errors"
     , withJson isZero ("(x * out) == 0" `isInfixOf`) )
+
+  -- SMT escalation: the query, built without ever running a solver -----
+  , ( "smt: the failing scope is named, so escalation asks about it alone"
+    , scopeOfFailure isZeroBroken == Just ("is_zero", True) )
+
+  , ( "smt: the system carries one equation per assertion, over named atoms"
+    , case gadgetBodyOf isZero "is_zero" >>= systemFor of
+        Just system ->
+          length (bsEquations system) == 2
+          && map snd (bsAtoms system) == ["x", "out", "inv"]
+          && [ n | (_, n, _) <- bsTargets system ] == ["out"]
+          && bsInputs system == [1]
+        Nothing -> False )
+
+  , ( "smt: the query declares both witness copies of every atom"
+    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
+        -- three atoms (x, out, inv), twice over
+        Just text -> occurrences "(declare-fun " text == 6
+        Nothing -> False )
+
+  , ( "smt: the copies are forced to agree on the inputs"
+    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
+        Just text -> "(assert (= w1_1 w1_2))" `isInfixOf` text
+        Nothing -> False )
+
+  , ( "smt: the question asked is whether an output can still differ"
+    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
+        Just text -> "(assert (not (= (mod w2_1 P) (mod w2_2 P))))" `isInfixOf` text
+        Nothing -> False )
+
+  , ( "smt: the ff dialect speaks QF_FF and field operations natively"
+    , case gadgetBodyOf isZero "is_zero" >>= queryFor FiniteField "is_zero" of
+        Just text -> "(set-logic QF_FF)" `isInfixOf` text
+                     && "FiniteField" `isInfixOf` text
+                     && "ff.mul" `isInfixOf` text
+                     -- no modular encoding anywhere: the field is native here
+                     && not ("(mod " `isInfixOf` text)
+        Nothing -> False )
+
+  , ( "smt: the int dialect encodes the field as bounded integers with mod"
+    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
+        Just text -> "(set-logic QF_NIA)" `isInfixOf` text
+                     && "(mod " `isInfixOf` text
+                     && "(>= w1_1 0)" `isInfixOf` text
+        Nothing -> False )
+
+  , ( "smt: a gadget's precondition is assumed in both copies, not refuted"
+    , case gadgetBodyOf requireOk "scale" >>= queryFor IntegerMod "scale" of
+        Just text -> occurrences "(assert (not (= (mod w1_" text == 2
+        Nothing -> False )
+
+  -- The soundness asymmetry: relaxations may prove, but must not refute --
+  , ( "smt: a scope that instantiates gadgets is flagged as a relaxation"
+    , case circuitBodyOf isZero >>= systemFor of
+        Just system -> not (bsSelfContained system)
+        Nothing -> False )
+
+  , ( "smt: a gadget body with no instances is self-contained"
+    , case gadgetBodyOf isZero "is_zero" >>= systemFor of
+        Just system -> bsSelfContained system
+        Nothing -> False )
+
+  -- Reading the solver back ---------------------------------------------
+  , ( "smt: unsat is read as proved"
+    , parseAnswer "unsat\n" == AnswerUnsat )
+
+  , ( "smt: sat is read together with its model"
+    , parseAnswer "sat\n((w1_1 2) (w2_1 1))" == AnswerSat [("w1_1", 2), ("w2_1", 1)] )
+
+  , ( "smt: a solver that gives up is not mistaken for an answer"
+    , case parseAnswer "unknown" of
+        AnswerUnknown _ -> True
+        _ -> False )
+
+  , ( "smt: a timeout is reported as a timeout, never as a refutation"
+    , case parseAnswer "timeout" of
+        AnswerUnknown reason -> "timed out" `isInfixOf` reason
+        _ -> False )
+
+  , ( "smt: an error from the solver is not silently read as a verdict"
+    , case parseAnswer "(error \"not configured with --cocoa\")" of
+        AnswerUnknown reason -> "unrecognised" `isInfixOf` reason
+        _ -> False )
+
+  , ( "smt: negative and field-literal model values are understood"
+    , parseAnswer "sat\n((a (- 5)) (b #f7m11) (c (as ff9 F)))"
+        == AnswerSat [("a", -5), ("b", 7), ("c", 9)] )
 
   -- Golden IR: the rewrite is behaviour-preserving ----------------------
   , ( "golden: rewritten IsZero inlines to the same shape (2 inputs, 6 nodes, 2 assertions)"
