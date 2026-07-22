@@ -44,9 +44,13 @@
 module Zkc.Analysis.Determinacy
   ( checkDeterminacy
   , checkProgram
+  , checkProgramWith
   , Assumption(..)
   , Report(..)
   , Failure(..)
+  , ProgramFailure(..)
+  , BodySystem(..)
+  , bodySystem
   , maxSplitDepth
   ) where
 
@@ -134,18 +138,60 @@ data Summary = Summary
   , sumNonzero :: [Int]           -- ^ param indices guaranteed nonzero by the body
   }
 
+-- | Which scope a proof obligation belongs to, and everything an escalating
+-- checker needs in order to ask a solver about it.
+--
+-- The decidable core is incomplete by construction, so \"could not prove\" is a
+-- normal outcome, not a crash. Carrying the failing scope's 'Body' out with the
+-- failure is what lets a caller escalate to SMT (Workstream B) without the
+-- analysis knowing anything about solvers.
+data ProgramFailure = ProgramFailure
+  { pfScope :: String        -- ^ gadget name, or the circuit's name
+  , pfIsGadget :: Bool       -- ^ False for the circuit itself
+  , pfBody :: Body           -- ^ the scope whose obligation is open
+  , pfFailure :: Failure
+  }
+
 -- | Prove every gadget (in the given callees-first order) and then the
 -- circuit, applying summaries at instantiation sites.
-checkProgram :: Integer -> [(GadgetDef, Body)] -> Body -> Either Failure Report
-checkProgram modulus gadgetBodies circuitBody = do
+checkProgram :: Integer -> [(GadgetDef, Body)] -> Body -> Either ProgramFailure Report
+checkProgram modulus = checkProgramWith modulus Set.empty
+
+-- | As 'checkProgram', but treating the named gadgets as already proved.
+--
+-- This is the hook escalation hangs on: when a solver discharges a gadget the
+-- decidable core could not, the caller re-runs the compositional proof with
+-- that gadget assumed. The assumed summary is deliberately /weak/ — results
+-- determined, no case splits, and no exported nonzero facts — so assuming it
+-- can never make a caller's proof succeed for a reason the solver did not
+-- actually establish.
+checkProgramWith :: Integer -> Set.Set String -> [(GadgetDef, Body)] -> Body
+                 -> Either ProgramFailure Report
+checkProgramWith modulus assumed gadgetBodies circuitBody = do
   summaries <- foldl' proveNext (Right Map.empty) gadgetBodies
-  (branches, _) <- proveBody modulus summaries circuitBody
+  (branches, _) <- inScope circuitName False circuitBody
+                     (proveBody modulus summaries circuitBody)
   Right (Report (bodyResultTargets circuitBody) branches)
   where
+    circuitName = "circuit"
     proveNext acc (def, body) = do
       done <- acc
-      summary <- summariseGadget modulus done def body
+      summary <-
+        if gdName def `Set.member` assumed
+          then Right (assumedSummary body)
+          else inScope (gdName def) True body (summariseGadget modulus done def body)
       Right (Map.insert (gdName def) summary done)
+
+    inScope name isGadget body = either (Left . ProgramFailure name isGadget body) Right
+
+    assumedSummary body = Summary
+      { sumParamWires = bodyParams body
+      , sumResultWires = bodyResultTargets body
+      , sumBranches = [[]]
+      , sumRequired =
+          [ i | (i, w) <- zip [0 ..] (bodyParams body), w `elem` bodyRequires body ]
+      , sumNonzero = []
+      }
 
 -- | Prove one gadget definition and package the result as a 'Summary'.
 summariseGadget :: Integer -> Map.Map String Summary -> GadgetDef -> Body
@@ -160,6 +206,58 @@ summariseGadget modulus summaries def body = do
     , sumRequired = [ i | (i, w) <- zip [0 ..] (bodyParams body), w `elem` bodyRequires body ]
     , sumNonzero = guaranteed
     }
+
+-- | A scope's proof obligation, expressed purely as polynomials.
+--
+-- This is the decidable core handing its own question to something else. The
+-- analysis owns polynomial construction; a consumer (the SMT backend) owns how
+-- to ask it.
+data BodySystem = BodySystem
+  { bsAtoms :: [(WireId, String)]   -- ^ every free atom, with a source-level name
+  , bsEquations :: [Poly]           -- ^ each assertion as @P = 0@
+  , bsInputs :: [WireId]            -- ^ atoms two witnesses must agree on
+  , bsTargets :: [(WireId, String, Poly)] -- ^ what they must not be able to disagree on
+  , bsNonzero :: [WireId]           -- ^ atoms assumed nonzero (from @require@)
+  , bsSelfContained :: Bool
+    -- ^ False when the scope contains gadget instances.
+    --
+    -- Instance /results/ appear as free atoms here, but the constraints that
+    -- pin them down live in the callee and are deliberately not expanded. The
+    -- system is therefore a __relaxation__: it admits at least every witness the
+    -- real circuit does. That asymmetry decides what a solver's answer means —
+    -- @unsat@ on a relaxation still implies @unsat@ on the real thing, so a
+    -- /proof/ carries over; @sat@ may be an artifact of the dropped
+    -- constraints, so a /refutation/ does not.
+  }
+
+-- | Build the polynomial system for one scope.
+bodySystem :: Integer -> Body -> Either Failure BodySystem
+bodySystem modulus body = do
+  wirePolys <- buildPolynomials modulus (Set.toList atomWires) (bodyNodes body)
+  let equations =
+        [ sub modulus (wirePolys Map.! aLhs a) (wirePolys Map.! aRhs a)
+        | a <- bodyAsserts body ]
+      targetPoly t = Map.findWithDefault (var modulus t) t wirePolys
+  Right BodySystem
+    { bsAtoms =
+        [ (w, atomName w)
+        | w <- Set.toList (atomWires `Set.union` Set.fromList (adviceOf body)) ]
+    , bsEquations = equations
+    , bsInputs = bodyParams body
+    , bsTargets = [ (t, atomName t, targetPoly t) | t <- bodyResultTargets body ]
+    , bsNonzero = bodyRequires body
+    , bsSelfContained = null (bodyInstances body)
+    }
+  where
+    atomWires = Set.fromList
+      ([ iiWire i | i <- bodyAtoms body ] ++ bodyParams body ++ bodyResultTargets body)
+    adviceOf b = [ nWire n | n <- bodyNodes b, isHint (nOp n) ]
+    atomName w =
+      case [ iiName i | i <- bodyAtoms body, iiWire i == w ] of
+        (n : _) -> n
+        [] -> case [ hiName info | Node w' (OHint info _) <- bodyNodes body, w' == w ] of
+          (n : _) -> n
+          [] -> "wire" ++ show w
 
 -- | The heart of composition: prove a body's result targets determined,
 -- applying summaries for the instances it contains rather than expanding them.
