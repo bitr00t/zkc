@@ -101,3 +101,47 @@ hidden:
 What is done and measured: the fusion itself, its correctness, and its win —
 50% on the constraint shape that dominates real circuits, end to end through the
 actual compiler.
+
+---
+
+# Plonkish — phase 4, Workstream D.1 (baseline)
+
+> Status: the **unoptimised** lowering. One row per arithmetic node, one per
+> assertion, no fusion. These numbers are the baseline D.2's gate fusion is
+> measured against, exactly as `fuse = false` was for R1CS.
+
+Measured with `lower::<Fr>` and `lower_plonkish::<Fr>` on the same IR:
+
+| circuit | R1CS constraints | Plonkish rows | copy constraints |
+|---|---|---|---|
+| `relation` | 1 | 3 | 2 |
+| `mul_square` | 2 | 3 | 3 |
+| `divide` | 2 | 5 | 4 |
+| `IsZero` | 2 | 7 | 7 |
+| `WideSum` (`z == a+b+..+f`) | 1 | 6 | 5 |
+| `ManyMul` (8 products) | 8 | 16 | 8 |
+
+Unfused Plonkish costs **1.5× to 3.5×** what R1CS does, which is the expected
+shape of the result and the reason D.2 exists: R1CS gets unlimited linear
+terms free, while a naive row-per-node lowering spends a row on every addition
+and every constant.
+
+**What D.2 has to hit.** The design note projects the *fused* cost — one row
+per assertion where the gate can absorb the multiplication and its linear
+terms. That makes the target concrete:
+
+| circuit | baseline (D.1) | target (D.2) |
+|---|---|---|
+| `IsZero` | 7 | 2 |
+| `ManyMul` | 16 | 8 |
+| `WideSum` | 6 | ~5 |
+
+`WideSum` barely moves, and that is the honest part: six summands cannot be
+folded into three-cell gates, so R1CS keeps its win there no matter how good
+the fusion is. The two arithmetizations genuinely disagree about what is
+expensive, which is the whole point of keeping the IR neutral.
+
+**Copy constraints are a cost with no R1CS counterpart.** In R1CS a wire *is*
+a variable and sharing is free; in Plonkish every reuse of a value across rows
+must be asserted, and a real prover pays for those in the permutation
+argument. They are reported here as a first-class number rather than hidden.
