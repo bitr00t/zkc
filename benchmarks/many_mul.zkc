@@ -1,0 +1,34 @@
+// A multiplication-heavy benchmark, built from a reused Workstream-A gadget.
+//
+// `product` is written ONCE and instantiated eight times; each instance emits
+// `assert o == a * b`, exactly the shape Workstream C's fusion targets. The
+// frontend proves `product` determined once (compositionally); the backend
+// then lowers each instance's multiplication into its assertion, so the eight
+// products cost eight rank-1 constraints rather than sixteen.
+//
+// This stands in for SHA-256 / Merkle inclusion — the real targets — which
+// need the gadget standard library (and intermediate composition) still to
+// come. The fusion win it demonstrates is the same one those will get.
+gadget product(a: field, b: field) -> (o: field) {
+    assert o == a * b;
+}
+
+circuit ManyMul {
+    private a0: field; private b0: field; output o0: field;
+    private a1: field; private b1: field; output o1: field;
+    private a2: field; private b2: field; output o2: field;
+    private a3: field; private b3: field; output o3: field;
+    private a4: field; private b4: field; output o4: field;
+    private a5: field; private b5: field; output o5: field;
+    private a6: field; private b6: field; output o6: field;
+    private a7: field; private b7: field; output o7: field;
+
+    (o0) = product(a0, b0);
+    (o1) = product(a1, b1);
+    (o2) = product(a2, b2);
+    (o3) = product(a3, b3);
+    (o4) = product(a4, b4);
+    (o5) = product(a5, b5);
+    (o6) = product(a6, b6);
+    (o7) = product(a7, b7);
+}
