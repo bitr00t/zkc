@@ -12,6 +12,7 @@ use ark_bn254::Fr;
 use zkc_core::field::ZkField;
 use zkc_core::ir::Ir;
 use zkc_core::lower::{lower, lower_with};
+use zkc_core::plonkish::lower_plonkish;
 use zkc_core::witness::{solve, SolveInputs};
 
 // --- Fixtures ------------------------------------------------------------
@@ -452,4 +453,116 @@ fn missing_input_values_are_reported_by_name() {
     let error = solve::<Fr>(&ir, &SolveInputs { inputs: &given, advice_overrides: &advice })
         .unwrap_err();
     assert!(error.contains("'out'"), "{error}");
+}
+// Plonkish arithmetization (phase 4, Workstream D) ------------------------
+//
+// The same IR, lowered a second way. These tests are about the lowering being
+// *faithful*: the shape is what the gate algebra says it should be, the
+// wiring is asserted rather than assumed, and an honest witness satisfies it.
+
+#[test]
+fn plonkish_gives_every_arithmetic_node_a_row_and_hints_none() {
+    // IsZero: 2 muls, 1 sub, 2 consts, 1 hint, 2 assertions.
+    // A hint imposes no identity, so it gets no row — the same reason it
+    // allocates a variable and no constraint in R1CS.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let circuit = lower_plonkish::<Fr>(&ir).unwrap();
+    let arithmetic = ir
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.op, zkc_core::ir::NodeOp::Hint { .. }))
+        .count();
+    assert_eq!(circuit.num_rows(), arithmetic + ir.assertions.len());
+    // Width is fixed by the gate: three witness columns, five selectors.
+    assert_eq!(circuit.num_columns(), 8);
+}
+
+#[test]
+fn plonkish_asserts_the_wiring_instead_of_assuming_it() {
+    // The property with no R1CS counterpart: a value produced in one row and
+    // consumed in another occupies two unrelated cells, and only a copy
+    // constraint makes them the same value.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let circuit = lower_plonkish::<Fr>(&ir).unwrap();
+    assert!(
+        !circuit.copies.is_empty(),
+        "a connected circuit must produce copy constraints"
+    );
+    // Every copy relates two genuinely different cells.
+    for (left, right) in &circuit.copies {
+        assert!(left != right, "a cell copied to itself is not wiring");
+    }
+}
+
+#[test]
+fn plonkish_accepts_the_honest_witness() {
+    // x = 0 forces out = 1; the solved witness must satisfy every gate and
+    // every copy constraint.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "0"), ("out", "1")]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    let circuit = lower_plonkish::<Fr>(&ir).unwrap();
+    let assignment = circuit.assignment(&wires);
+    let violations = circuit.check(&assignment);
+    assert!(violations.is_empty(), "honest witness rejected: {violations:?}");
+}
+
+#[test]
+fn plonkish_catches_a_tampered_cell_through_a_copy_constraint() {
+    // Copy constraints are satisfied by construction when the table is built
+    // from wire values, so the check only earns its keep against a table that
+    // did NOT come from there. Rewrite one cell and it must be caught.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "0"), ("out", "1")]),
+            advice_overrides: &HashMap::new(),
+        },
+    )
+    .unwrap();
+    let circuit = lower_plonkish::<Fr>(&ir).unwrap();
+    let mut assignment = circuit.assignment(&wires);
+    // Pick a wire that really is shared, and corrupt its second occurrence.
+    let (_, second) = circuit.copies[0];
+    assignment[second.row][second.column.index()] = Fr::from_decimal("12345").unwrap();
+    assert!(
+        !circuit.is_satisfied(&assignment),
+        "a cell that disagrees with its copy must be rejected"
+    );
+}
+
+#[test]
+fn plonkish_binds_every_public_input_to_a_cell() {
+    // The verifier needs somewhere to point at for each public value.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let circuit = lower_plonkish::<Fr>(&ir).unwrap();
+    let public = ir.inputs.iter().filter(|i| i.visibility.is_public()).count();
+    assert_eq!(circuit.public_cells.len(), public);
+    for (_, cell) in &circuit.public_cells {
+        assert!(cell.row < circuit.num_rows());
+    }
+}
+
+#[test]
+fn plonkish_costs_more_than_r1cs_on_this_shape_and_that_is_expected() {
+    // The unoptimised baseline the design note predicts: a row per node beats
+    // nothing, and R1CS's free linear algebra wins here. Fusing assertions
+    // into gates is the Plonkish-native optimisation, measured separately.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let r1cs = lower::<Fr>(&ir).unwrap();
+    let plonkish = lower_plonkish::<Fr>(&ir).unwrap();
+    println!(
+        "BENCH circuit=IsZero r1cs_constraints={} plonkish_rows={} plonkish_copies={}",
+        r1cs.constraints.len(),
+        plonkish.num_rows(),
+        plonkish.copies.len()
+    );
+    assert!(plonkish.num_rows() > r1cs.constraints.len());
 }
