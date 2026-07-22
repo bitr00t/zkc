@@ -377,8 +377,10 @@ gadgetBody gadgetMap def = do
       atomResults = [ r | r <- gdResults def, Map.lookup r kinds == Just ResultAtom ]
       paramWires = [1 .. length params]
       atomWires = [ length params + 1 .. length params + length atomResults ]
-      paramInputs = [ IrInput w n Private 0 | (w, n) <- zip paramWires params ]
-      atomInputs = [ IrInput w n Output 0 | (w, n) <- zip atomWires atomResults ]
+      -- Atoms carry the gadget's own line, so a failed obligation inside a
+      -- definition points at the definition rather than at line 1.
+      paramInputs = [ IrInput w n Private (gdLine def) | (w, n) <- zip paramWires params ]
+      atomInputs = [ IrInput w n Output (gdLine def) | (w, n) <- zip atomWires atomResults ]
       env0 = Map.fromList (zip params paramWires ++ zip atomResults atomWires)
       st0 = St { stNext = 1 + length params + length atomResults, stEnv = env0
                , stFlatNodes = [], stFlatAsserts = []
