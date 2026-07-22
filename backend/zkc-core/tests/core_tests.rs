@@ -844,3 +844,205 @@ fn a_violation_describes_itself_in_source_terms() {
         "unhelpful violation message: {described}"
     );
 }
+
+// Differential equivalence: R1CS ≡ Plonkish (phase 4, Workstream E.2) ------
+//
+// This is the payoff the whole neutral-IR discipline was for. Two lowerings,
+// written independently, must encode the SAME statement — not merely both be
+// satisfiable somewhere, but agree assignment by assignment: a witness
+// satisfies R1CS if and only if it satisfies Plonkish. We cannot quantify over
+// all assignments, so we check the two places it matters most (the honest
+// witness, which both must accept; the phase-0 forgery, which both must
+// reject) and then hammer it with random perturbations, where any disagreement
+// would surface as one lowering accepting what the other refuses.
+//
+// The witness solver runs on the IR and is shared unchanged — so "the same
+// witness" is not an approximation, it is literally the same solved vector fed
+// to both. That sharing is what makes the comparison meaningful: if the two
+// arithmetizations disagree, it is the lowering's fault and nothing else's.
+
+/// Do both arithmetizations reach the same verdict on these solved wires?
+///
+/// R1CS builds one assignment vector; Plonkish builds a per-row cell table
+/// from the same wire values. Both are honest functions of the shared witness,
+/// so this compares the two encodings, not two witnesses.
+fn verdicts_agree(ir: &Ir, wires: &[Fr]) -> Result<bool, (bool, bool)> {
+    let r1cs = lower::<Fr>(ir).unwrap();
+    let r1cs_ok = r1cs.is_satisfied(&r1cs.assignment(wires));
+
+    // Fused and unfused Plonkish must both agree with R1CS, or fusion changed
+    // the statement — which would be a far worse bug than a slow circuit.
+    for fuse in [false, true] {
+        let plonk = lower_plonkish_with::<Fr>(ir, fuse).unwrap();
+        let plonk_ok = plonk.is_satisfied(&plonk.assignment(wires));
+        if plonk_ok != r1cs_ok {
+            return Err((r1cs_ok, plonk_ok));
+        }
+    }
+    Ok(r1cs_ok)
+}
+
+#[test]
+fn equivalence_the_honest_witness_satisfies_both() {
+    // x = 0 forces out = 1; the honestly solved witness must satisfy R1CS and
+    // Plonkish alike.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs { inputs: &inputs(&[("x", "0"), ("out", "1")]), advice_overrides: &HashMap::new() },
+    )
+    .unwrap();
+    assert_eq!(verdicts_agree(&ir, &wires), Ok(true), "honest witness split the two lowerings");
+}
+
+#[test]
+fn equivalence_the_phase_zero_forgery_is_rejected_by_both() {
+    // The forgery that started the whole project: inputs x = 5, out = 1, with
+    // the hint overridden to inv = 0 so assertion (1) holds while claiming a
+    // false output. R1CS catches it on assertion (2); Plonkish must catch it
+    // too, or the second arithmetization is weaker than the first.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "5"), ("out", "1")]),
+            advice_overrides: &inputs(&[("inv", "0")]),
+        },
+    )
+    .unwrap();
+    // Both must REJECT: verdicts agree, and the verdict is "unsatisfied".
+    assert_eq!(
+        verdicts_agree(&ir, &wires),
+        Ok(false),
+        "the phase-0 forgery was not rejected identically by both arithmetizations"
+    );
+}
+
+#[test]
+fn equivalence_the_broken_circuit_accepts_the_forgery_in_both() {
+    // The other half of the phase-0 demo: with the second assertion GONE, the
+    // same forged witness satisfies the circuit — and it must do so in both
+    // arithmetizations, because being under-constrained is a property of the
+    // IR, which both lower faithfully. If Plonkish rejected here while R1CS
+    // accepted, the two would disagree about what the circuit even says.
+    let ir = Ir::from_json(ISZERO_BROKEN_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs {
+            inputs: &inputs(&[("x", "5"), ("out", "1")]),
+            advice_overrides: &inputs(&[("inv", "0")]),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        verdicts_agree(&ir, &wires),
+        Ok(true),
+        "the two arithmetizations disagree about the under-constrained circuit"
+    );
+}
+
+#[test]
+fn equivalence_holds_under_random_perturbation_of_atoms() {
+    // The general claim, stress-tested — but on the right variables.
+    //
+    // A subtlety worth stating, because finding it is half the value of a
+    // differential test: R1CS and Plonkish do NOT agree on an assignment that
+    // gives a computed wire a value inconsistent with its inputs. R1CS never
+    // reads such a wire — it recomputes `a * b` from the argument cells and
+    // ignores whatever the product wire holds — while Plonkish places that
+    // wire in a cell and checks `a·b - c = 0`, so it catches the inconsistency.
+    // Both are correct; they simply encode "the witness solver already
+    // computed the intermediates" differently.
+    //
+    // The witness solver is the arbiter of intermediate values, and it is
+    // shared. So the meaningful free variables — the ones a prover actually
+    // chooses — are the ATOMS: inputs and advice. Perturb those, re-solve so
+    // the intermediates stay consistent, and the two arithmetizations must
+    // agree. (Perturbing a computed wire directly tests a witness no honest
+    // solver would ever produce, and is the job of the per-lowering checks,
+    // not the equivalence one.)
+    let cases: &[(&str, &[(&str, &str)], &[&str])] = &[
+        (ISZERO_IR, &[("x", "0"), ("out", "1")], &["x", "out", "inv"]),
+        (ISZERO_BROKEN_IR, &[("x", "5"), ("out", "1")], &["x", "out", "inv"]),
+        (MULSQUARE_IR, &[("a", "2"), ("b", "3"), ("c", "36")], &["a", "b", "c"]),
+        (WIDESUM_IR,
+         &[("a","1"),("b","2"),("c","3"),("d","4"),("e","5"),("f","6"),("z","21")],
+         &["a","b","c","d","e","f","z"]),
+    ];
+
+    let mut state: u64 = 0x9e3779b97f4a7c15;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state >> 33
+    };
+
+    for (fixture, base_inputs, atoms) in cases {
+        let ir = Ir::from_json(fixture).unwrap();
+        let input_names: std::collections::HashSet<&str> =
+            ir.inputs.iter().map(|i| i.name.as_str()).collect();
+
+        for _ in 0..300 {
+            // A random value for each atom: inputs go through the solver,
+            // advice through overrides, so every intermediate stays consistent
+            // with the atoms that produced it.
+            let mut input_map: HashMap<String, Fr> = HashMap::new();
+            let mut advice_map: HashMap<String, Fr> = HashMap::new();
+            for name in *atoms {
+                let value = Fr::from_u64(next());
+                if input_names.contains(name) {
+                    input_map.insert((*name).to_string(), value);
+                } else {
+                    advice_map.insert((*name).to_string(), value);
+                }
+            }
+            // Any base input not chosen as an atom still needs a value.
+            for (name, value) in inputs(base_inputs) {
+                input_map.entry(name).or_insert(value);
+            }
+
+            let wires = solve::<Fr>(
+                &ir,
+                &SolveInputs { inputs: &input_map, advice_overrides: &advice_map },
+            )
+            .unwrap();
+
+            match verdicts_agree(&ir, &wires) {
+                Ok(_) => {}
+                Err((r1cs_ok, plonk_ok)) => panic!(
+                    "arithmetizations diverged on a consistent witness of {}:                      R1CS satisfied = {r1cs_ok}, Plonkish satisfied = {plonk_ok}",
+                    ir.name
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn equivalence_a_forged_output_is_caught_by_both_across_circuits() {
+    // Directed rather than random: for each circuit with an output, solve
+    // honestly, then overwrite the output wire with a wrong value everywhere
+    // it appears. Both arithmetizations must reject — the property that makes
+    // the determinacy guarantee survive the choice of arithmetization.
+    let cases: &[(&str, &[(&str, &str)], &str, &str)] = &[
+        (ISZERO_IR, &[("x", "0"), ("out", "1")], "out", "0"),
+        (MULSQUARE_IR, &[("a", "2"), ("b", "3"), ("c", "36")], "c", "35"),
+        (WIDESUM_IR, &[("a","1"),("b","2"),("c","3"),("d","4"),("e","5"),("f","6"),("z","21")], "z", "20"),
+    ];
+    for (fixture, base_inputs, output, lie) in cases {
+        let ir = Ir::from_json(fixture).unwrap();
+        let wires = solve::<Fr>(
+            &ir,
+            &SolveInputs { inputs: &inputs(base_inputs), advice_overrides: &HashMap::new() },
+        )
+        .unwrap();
+        let wire = ir.inputs.iter().find(|i| &i.name == output).unwrap().wire;
+        let mut forged = wires.clone();
+        forged[wire as usize] = Fr::from_decimal(lie).unwrap();
+
+        assert_eq!(
+            verdicts_agree(&ir, &forged),
+            Ok(false),
+            "a forged output of {} was not rejected identically by both", ir.name
+        );
+    }
+}
