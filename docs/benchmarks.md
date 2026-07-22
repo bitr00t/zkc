@@ -126,22 +126,49 @@ shape of the result and the reason D.2 exists: R1CS gets unlimited linear
 terms free, while a naive row-per-node lowering spends a row on every addition
 and every constant.
 
-**What D.2 has to hit.** The design note projects the *fused* cost — one row
-per assertion where the gate can absorb the multiplication and its linear
-terms. That makes the target concrete:
+**Fusion closes the gap — except where it structurally cannot.**
 
-| circuit | baseline (D.1) | target (D.2) |
-|---|---|---|
-| `IsZero` | 7 | 2 |
-| `ManyMul` | 16 | 8 |
-| `WideSum` | 6 | ~5 |
+| circuit | R1CS | Plonkish baseline | Plonkish fused |
+|---|---|---|---|
+| `relation` | 1 | 3 | **1** |
+| `mul_square` | 2 | 3 | **2** |
+| `divide` | 2 | 5 | **2** |
+| `IsZero` | 2 | 7 | **2** |
+| `ManyMul` (8 products) | 8 | 16 | **8** |
+| `WideSum` (`z == a+b+..+f`) | 1 | 6 | **5** |
 
-`WideSum` barely moves, and that is the honest part: six summands cannot be
-folded into three-cell gates, so R1CS keeps its win there no matter how good
-the fusion is. The two arithmetizations genuinely disagree about what is
-expensive, which is the whole point of keeping the IR neutral.
+On every multiplication-shaped circuit the fused Plonkish lowering **matches
+R1CS exactly**. `assert x * inv == 1 - out` is four rows unfused — a constant,
+a subtraction, a multiplication and the assertion — and one row fused, because
+a single gate holds a product, a linear term and a constant at once:
 
-**Copy constraints are a cost with no R1CS counterpart.** In R1CS a wire *is*
-a variable and sharing is free; in Plonkish every reuse of a value across rows
-must be asserted, and a real prover pays for those in the permutation
-argument. They are reported here as a first-class number rather than hidden.
+```text
+    q_M·x·inv  +  q_O·out  +  q_C  =  0        with q_M = 1, q_O = 1, q_C = -1
+```
+
+`WideSum` is the exception, and it is the honest one: fusion takes it from 6
+rows to 5 and then stops. Six summands do not fit in three-cell gates however
+cleverly they are packed, while R1CS folds them into one linear combination
+for free. **This is structural, not a missing optimisation** — and it is
+exactly the disagreement that justifies keeping the IR neutral. Neither
+arithmetization dominates; which is cheaper depends on the circuit's shape.
+
+**Fusion also removes wiring.** Copy constraints are a cost with no R1CS
+counterpart: in R1CS a wire *is* a variable and sharing is free, while in
+Plonkish every reuse across rows must be asserted, and a real prover pays for
+those in the permutation argument. Folding a value into the gate that consumes
+it means it never crosses a row boundary at all — `IsZero` drops from 7 copies
+to 2, and `ManyMul` from 8 to **zero**.
+
+**How fusion decides.** Not by pattern-matching. A node is folded into its
+consumer while the resulting expression stays inside the three-cell budget;
+when it would overflow, the node is *materialised* — given its own row and a
+cell — and the consumer refers to it by wire. Materialising is always
+available and always fits, which makes the procedure total: materialise
+everything and you are back at the baseline. Values used more than once are
+materialised up front, for the same reason common-subexpression elimination
+exists.
+
+Correctness travels with cost, as in Workstream C: tests check that the fused
+circuit accepts the honest witness and rejects a forged output, so the row
+count never falls by weakening the circuit.
