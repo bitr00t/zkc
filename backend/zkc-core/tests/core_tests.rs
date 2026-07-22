@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use ark_bn254::Fr;
 use zkc_core::field::ZkField;
 use zkc_core::ir::Ir;
-use zkc_core::lower::lower;
+use zkc_core::lower::{lower, lower_with};
 use zkc_core::witness::{solve, SolveInputs};
 
 // --- Fixtures ------------------------------------------------------------
@@ -77,6 +77,24 @@ const LINEAR_IR: &str = r#"{
   "assertions": [
     {"lhs": 2, "rhs": 6, "label": "z == a - (-(a + 3))", "line": 5}],
   "determinacy": {"proved": true, "targets": ["z"], "branches": [[]]}
+}"#;
+
+/// `c == (a * b) * (a * b)`. The inner `a * b` feeds the outer mul (used
+/// twice), so it is NOT fusible and keeps its variable; only the outer mul,
+/// which feeds the single assertion, fuses. Proves fusion is precise about
+/// "feeds exactly one assertion and nothing else".
+const MULSQUARE_IR: &str = r#"{
+  "schema_version": 2, "name": "MulSquare", "field": "bn254", "const_one_wire": 0,
+  "inputs": [
+    {"wire": 1, "name": "a", "visibility": "private"},
+    {"wire": 2, "name": "b", "visibility": "private"},
+    {"wire": 3, "name": "c", "visibility": "output", "line": 4}],
+  "nodes": [
+    {"wire": 4, "op": "mul", "args": [1, 2]},
+    {"wire": 5, "op": "mul", "args": [4, 4]}],
+  "assertions": [
+    {"lhs": 3, "rhs": 5, "label": "c == (a * b) * (a * b)", "line": 6}],
+  "determinacy": {"proved": true, "targets": ["c"], "branches": [[]]}
 }"#;
 
 fn inputs(pairs: &[(&str, &str)]) -> HashMap<String, Fr> {
@@ -204,9 +222,12 @@ fn linear_operations_cost_nothing() {
 }
 
 #[test]
-fn multiplications_and_hints_allocate_variables() {
+fn without_fusion_each_multiplication_costs_its_own_variable() {
+    // The phase-2 lowering, preserved behind `fuse = false`: each of IsZero's
+    // two muls allocates a variable and a constraint, and each assertion adds
+    // another. This is the baseline the fusion is measured against.
     let ir = Ir::from_json(ISZERO_IR).unwrap();
-    let r1cs = lower::<Fr>(&ir).unwrap();
+    let r1cs = lower_with::<Fr>(&ir, false).unwrap();
     // one + x + out + inv(hint) + two multiplication results
     assert_eq!(r1cs.num_vars, 6);
     // two multiplications + two assertions
@@ -216,13 +237,149 @@ fn multiplications_and_hints_allocate_variables() {
 }
 
 #[test]
+fn fusion_folds_each_iszero_multiplication_into_its_assertion() {
+    // Both of IsZero's muls feed exactly one assertion and nothing else, so
+    // both fuse: the two intermediate variables and the two equality
+    // constraints all vanish, leaving one rank-1 constraint per assertion.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let r1cs = lower::<Fr>(&ir).unwrap();
+    assert_eq!(r1cs.num_vars, 4); // one + x + out + inv; no mul variables
+    assert_eq!(r1cs.constraints.len(), 2); // two fused constraints, down from four
+    // The public interface is untouched by an internal optimisation.
+    assert_eq!(r1cs.public_vars.len(), 1);
+}
+
+#[test]
 fn a_hint_adds_a_variable_but_no_constraint() {
     // The mechanical statement of "advice is unconstrained": removing the
-    // hint's *constraint* is impossible, because there never was one.
+    // hint's *constraint* is impossible, because there never was one. The one
+    // multiplication fuses into the assertion, but the hint variable remains,
+    // constraintless — which is the whole point.
     let ir = Ir::from_json(ISZERO_BROKEN_IR).unwrap();
     let r1cs = lower::<Fr>(&ir).unwrap();
-    assert_eq!(r1cs.num_vars, 5); // one + x + out + inv + one multiplication
-    assert_eq!(r1cs.constraints.len(), 2); // one multiplication + one assertion
+    assert_eq!(r1cs.num_vars, 4); // one + x + out + inv; the mul fused away
+    assert_eq!(r1cs.constraints.len(), 1); // one fused constraint, down from two
+}
+
+#[test]
+fn fusion_is_precise_only_the_mul_feeding_the_assertion_folds() {
+    // The inner a*b is used by the outer mul, so it must keep its variable and
+    // constraint; only the outer mul folds into the assertion.
+    let ir = Ir::from_json(MULSQUARE_IR).unwrap();
+    let unfused = lower_with::<Fr>(&ir, false).unwrap();
+    let fused = lower::<Fr>(&ir).unwrap();
+    assert_eq!(unfused.constraints.len(), 3); // inner mul + outer mul + assertion
+    assert_eq!(fused.constraints.len(), 2); // inner mul + fused assertion
+    assert_eq!(unfused.num_vars, 6); // one + a + b + c + ab + abab
+    assert_eq!(fused.num_vars, 5); // one + a + b + c + ab (outer mul folded)
+}
+
+#[test]
+fn fusion_preserves_satisfaction_and_still_catches_a_lie() {
+    // Same witness, both lowerings: honest values satisfy, a wrong output is
+    // caught. Fusion must change the cost, never the meaning.
+    let ir = Ir::from_json(MULSQUARE_IR).unwrap();
+    let wires = solve::<Fr>(
+        &ir,
+        &SolveInputs { inputs: &inputs(&[("a", "2"), ("b", "3"), ("c", "36")]), advice_overrides: &HashMap::new() },
+    )
+    .unwrap();
+    for fuse in [false, true] {
+        let r1cs = lower_with::<Fr>(&ir, fuse).unwrap();
+        assert!(r1cs.is_satisfied(&r1cs.assignment(&wires)), "honest witness rejected (fuse={fuse})");
+    }
+    // A forged output (c = 35 instead of 36) is caught either way. We check the
+    // constraint system directly by overriding c in the assignment.
+    for fuse in [false, true] {
+        let r1cs = lower_with::<Fr>(&ir, fuse).unwrap();
+        let mut assignment = r1cs.assignment(&wires);
+        // Variable for `c` is the third input variable (one, a, b, c -> index 3).
+        assignment[3] = Fr::from_decimal("35").unwrap();
+        assert!(!r1cs.is_satisfied(&assignment), "forged output accepted (fuse={fuse})");
+    }
+}
+
+/// Build an IR of `n` independent `assert o_i == a_i * b_i` products — the
+/// shape fusion targets, and a stand-in for the multiplication-heavy circuits
+/// (SHA-256, Merkle) the full benchmark will use once the gadget stdlib lands.
+fn many_products_ir(n: usize) -> String {
+    let mut inputs = String::new();
+    for i in 0..n {
+        let (a, b, o) = (3 * i + 1, 3 * i + 2, 3 * i + 3);
+        inputs.push_str(&format!(
+            "{{\"wire\":{a},\"name\":\"a{i}\",\"visibility\":\"private\"}},\
+             {{\"wire\":{b},\"name\":\"b{i}\",\"visibility\":\"private\"}},\
+             {{\"wire\":{o},\"name\":\"o{i}\",\"visibility\":\"output\"}}"
+        ));
+        if i + 1 < n {
+            inputs.push(',');
+        }
+    }
+    let first_node = 3 * n + 1;
+    let mut nodes = String::new();
+    let mut assertions = String::new();
+    let mut targets = String::new();
+    for i in 0..n {
+        let (a, b, o) = (3 * i + 1, 3 * i + 2, 3 * i + 3);
+        let mul_wire = first_node + i;
+        nodes.push_str(&format!("{{\"wire\":{mul_wire},\"op\":\"mul\",\"args\":[{a},{b}]}}"));
+        assertions.push_str(&format!(
+            "{{\"lhs\":{o},\"rhs\":{mul_wire},\"label\":\"o{i} == a{i} * b{i}\",\"line\":{i}}}"
+        ));
+        targets.push_str(&format!("\"o{i}\""));
+        if i + 1 < n {
+            nodes.push(',');
+            assertions.push(',');
+            targets.push(',');
+        }
+    }
+    format!(
+        "{{\"schema_version\":2,\"name\":\"ManyProducts\",\"field\":\"bn254\",\
+          \"const_one_wire\":0,\"inputs\":[{inputs}],\"nodes\":[{nodes}],\
+          \"assertions\":[{assertions}],\
+          \"determinacy\":{{\"proved\":true,\"targets\":[{targets}],\"branches\":[[]]}}}}"
+    )
+}
+
+#[test]
+fn benchmark_fusion_halves_constraints_on_a_multiplication_heavy_circuit() {
+    // The headline number, pinned to a test. On N independent products, the
+    // naive lowering emits 2N constraints (a mul + an equality each); fusion
+    // emits exactly N. The machine-readable line is what a benchmark harness
+    // would diff across runs (and, later, against Circom's --r1cs counts).
+    let n = 64;
+    let ir = Ir::from_json(&many_products_ir(n)).unwrap();
+    let unfused = lower_with::<Fr>(&ir, false).unwrap();
+    let fused = lower::<Fr>(&ir).unwrap();
+
+    println!(
+        "BENCH circuit=ManyProducts n={n} \
+         constraints_unfused={} constraints_fused={} \
+         vars_unfused={} vars_fused={} reduction={:.2}",
+        unfused.constraints.len(),
+        fused.constraints.len(),
+        unfused.num_vars,
+        fused.num_vars,
+        1.0 - (fused.constraints.len() as f64) / (unfused.constraints.len() as f64),
+    );
+
+    assert_eq!(unfused.constraints.len(), 2 * n);
+    assert_eq!(fused.constraints.len(), n);
+    // Fusion removes exactly the N intermediate multiplication variables.
+    assert_eq!(unfused.num_vars - fused.num_vars, n);
+}
+
+#[test]
+fn benchmark_end_to_end_frontend_ir_lowers_with_the_fusion_win() {
+    // The same win, but on IR the *frontend* actually emitted (committed at
+    // benchmarks/many_mul.json), not a hand-written fixture — so it exercises
+    // Workstream A (the reused `product` gadget, proved once) and Workstream C
+    // (fusion) together, end to end.
+    let ir = Ir::from_json(include_str!("../../../benchmarks/many_mul.json")).unwrap();
+    let unfused = lower_with::<Fr>(&ir, false).unwrap();
+    let fused = lower::<Fr>(&ir).unwrap();
+    assert_eq!(unfused.constraints.len(), 16); // 8 muls + 8 assertions
+    assert_eq!(fused.constraints.len(), 8); // 8 fused products
 }
 
 #[test]
