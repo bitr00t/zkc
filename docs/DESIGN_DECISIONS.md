@@ -115,3 +115,39 @@ simplification; making them parameterised, reusable definitions is phase-3
 work, and doing it properly means call sites, instantiation and per-instance
 determinacy obligations. Shipping the quarantine first delivers the safety
 property without pretending the module system exists.
+
+---
+
+# Design decisions — phase 4
+
+## The free variables are the atoms, not every wire
+
+The differential-equivalence test (Workstream E.2) first tried to compare R1CS
+and Plonkish by perturbing *any* wire of an honest witness and requiring the
+two arithmetizations to agree. They did not, and the disagreement was
+instructive rather than a bug.
+
+Give a computed wire — say the result of `a * b` — a value inconsistent with
+its arguments, and R1CS still accepts while Plonkish rejects. R1CS never reads
+that wire: a multiplication constraint recomputes `⟨a,z⟩·⟨b,z⟩` from the
+argument variables and compares against `⟨c,z⟩`, and the product wire only
+appears as `c` when something downstream forces it. Plonkish, by contrast,
+places the product in a witness cell and asserts `a·b - c = 0` on the spot, so
+an inconsistent intermediate is caught immediately.
+
+Both are correct encodings of the IR. They merely make a different choice
+about where an intermediate value is *defined*: R1CS lets it be implicit in the
+recomputation, Plonkish makes it an explicit cell. Neither choice is wrong, and
+neither is what a prover controls — the witness solver, which runs on the IR
+and is shared by both backends, computes every intermediate from the atoms.
+
+So the variables a prover actually chooses, and the only ones an equivalence
+claim should quantify over, are the **atoms**: inputs and advice. Perturb those
+and re-solve, keeping the intermediates consistent, and the two arithmetizations
+agree without exception. Perturbing a computed wire tests a witness no honest
+solver would produce — which is a job for each lowering's own satisfiability
+check, not for the equivalence between them.
+
+The general lesson: when two encodings of the same relation disagree, suspect
+the comparison before the encodings. Here the encodings were both right and the
+comparison was quantifying over the wrong space.

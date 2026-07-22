@@ -116,16 +116,25 @@ cell) and require the break to be caught, because a validator that only ever
 passes is decoration. Violations describe themselves in source terms, as the
 R1CS checker does.
 
-**E.2 — Differential equivalence.** The centrepiece, and the reason this phase
-is credible. For the same IR and the **same solved witness** (the witness
-solver works on the IR, so it is shared unchanged):
+**E.2 — Differential equivalence.** *Done.* The centrepiece: two independently
+written lowerings must encode the **same statement**, not merely both be
+satisfiable somewhere. For the same IR and the same solved witness — the
+witness solver runs on the IR and is shared unchanged, so "same witness" is
+literal, not approximate — the verdicts must agree assignment by assignment.
+Checked where it matters (the honest witness, accepted by both; the phase-0
+forgery, rejected by both; the broken circuit, under-constrained in both) and
+then stress-tested with 1200 random consistent witnesses across four circuits.
 
-* an honest witness satisfies **both** arithmetizations;
-* a forged output is rejected by **both**.
-
-Reusing the phase-0 forgery here is the strongest available evidence that two
-independent lowerings encode the same statement. A bug that made Plonkish
-accept a forgery R1CS rejects would show up immediately.
+The random test **found something**, which is the point of differential
+testing. Perturbing a *computed* wire to a value inconsistent with its inputs
+splits the two: R1CS never reads such a wire (it recomputes `a·b` from the
+argument cells), while Plonkish places the product in a cell and checks
+`a·b - c = 0`, so it catches the inconsistency. Both lowerings are correct;
+they encode "the solver already computed the intermediates" differently. The
+resolution is that the free variables are the **atoms** — inputs and advice —
+because the shared witness solver, not the assignment, is the arbiter of every
+intermediate value. Perturb the atoms and re-solve, and the two agree without
+exception. (See DESIGN_DECISIONS.)
 
 ### F — The payoff: measuring neutrality
 
