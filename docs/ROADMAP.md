@@ -10,16 +10,16 @@ Two invariants hold at every phase:
 2. **Everything is generic over the field.** The field is a parameter, never
    hardcoded — BN254 for Groth16, Goldilocks for the FRI prover later.
 
-| Phase | Content | Status |
-|---|---|---|
-| 0 | Foundation spike: own field arithmetic, R1CS, satisfiability checker, and a working forgery against an under-constrained circuit | **done** |
-| 1 | Walking skeleton: source → typed IR → R1CS → witness → Groth16 proof, end to end | **done** |
-| 2 | The type system: `output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting | **done** |
-| 3 | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | **done** (see `README_phase3.md`; the gadget stdlib and the Circom benchmark carry over) |
-| 4 | Own arithmetization: Plonkish/AIR lowering from the same Core IR | **done** (see `docs/phase4.md`) |
-| 5 | Own prover: FRI over Goldilocks, replacing arkworks | **done** (see `docs/phase5.md`, `docs/phase5-status.md`) |
-| 6 | Tooling: language server, constraint-count profiler, gadget standard library | |
-| 7 | Recursion and formal verification of the lowering | |
+| Phase | Content                                                                                                                                            | Status                                                                                           |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 0     | Foundation spike: own field arithmetic, R1CS, satisfiability checker, and a working forgery against an under-constrained circuit                   | **done**                                                                                   |
+| 1     | Walking skeleton: source → typed IR → R1CS → witness → Groth16 proof, end to end                                                               | **done**                                                                                   |
+| 2     | The type system:`output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting                 | **done**                                                                                   |
+| 3     | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | **done** (see `README_phase3.md`; the gadget stdlib and the Circom benchmark carry over) |
+| 4     | Own arithmetization: Plonkish/AIR lowering from the same Core IR                                                                                   | **done** (see `docs/README_phase4.md`)                                                          |
+| 5     | Own prover: FRI over Goldilocks, replacing arkworks                                                                                                | **done** (see `docs/README_phase5.md`, `docs/phase5-status.md`)                               |
+| 6     | Tooling: language server, constraint-count profiler, gadget standard library                                                                       |                                                                                                  |
+| 7     | Recursion and formal verification of the lowering                                                                                                  |                                                                                                  |
 
 ## Phase 3 in detail
 
@@ -41,6 +41,8 @@ the exact attack.
 Merkle inclusion. Phase 2's optimizer does constant folding, CSE and dead-code
 elimination; competitive lowering needs linear-combination fusion and
 multiplication-gate packing.
+
+See `docs/README_phase3.md` for the full design note.
 
 ## Phase 4 in detail
 
@@ -72,7 +74,7 @@ same solved witness must satisfy both arithmetizations, and the phase-0
 forgery must be rejected by both. Phase 4 stops there — lowered, checked and
 measured, with no Plonkish prover — mirroring how R1CS entered in phase 0.
 
-See `docs/phase4.md` for the full design note.
+See `docs/README_phase4.md` for the full design note.
 
 ## Phase 5 in detail
 
@@ -98,4 +100,34 @@ last thing that should go unaudited — while the field and FRI are hand-written
 because they are the point. The end-to-end security test is the familiar one:
 the honest witness proves and verifies, the phase-0 forgery does not.
 
-See `docs/phase5.md` for the full design note.
+See `docs/README_phase5.md` for the full design note.
+
+## Phase 6 in detail
+
+**Tooling: a language server, a constraint-count profiler, and a gadget
+standard library.** This is the phase where the determinacy type system — the
+project's thesis — stops being a compiler feature and becomes a working
+environment. A proof that an output is under-determined is worth far more as a
+red underline the moment it is typed than as a terminal line after a full build.
+
+It is also the phase where the "not one line of the frontend changed" invariant
+retires, honestly rather than by redefinition: **tooling for a language is
+frontend work.** The shaping measurement was what the frontend already supports.
+It tracks lines end to end (lexer, AST, IR, diagnostics) but not columns; its
+diagnostics are already a structured record but are rendered only to strings;
+gadgets exist but there is no library; `zkc-stats` emits JSON but not per-line
+cost. So the frontend changes are additive and narrow — a JSON emitter beside
+the renderer, columns beside lines, an include for library gadgets — and the
+determinacy analysis is *surfaced*, not recomputed.
+
+Workstreams: **J** (machine-readable JSON diagnostics and column spans — the
+groundwork), **K** (the LSP server, wrapping the real pipeline, with hovers and
+lenses that show *why* an output is determined), **L** (per-source-line cost
+attribution over phase 4's cost model and phase 5's measurements, as a report
+and editor inlay hints), and **M** (a small standard library of gadgets written
+in the language and held to the same determinacy proof as user code — even the
+library is checked, not trusted). The invariant that replaces "frontend
+untouched" is that every frontend change is additive and regression-tested
+against the existing 90 frontend checks.
+
+See `docs/phase6.md` for the full design note.
