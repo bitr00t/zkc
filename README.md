@@ -1,198 +1,216 @@
-# Phase 4 — own arithmetization
+# Phase 5 — own prover: FRI over Goldilocks
 
-> Design note. Decisions are marked and can be overridden; the numbers in
-> "What it costs" are measured, not assumed.
+> Design note. Decisions are marked and overridable; the one measurement that
+> shapes the whole phase is at the top, because it was worth checking before
+> committing to any of this.
 
-## What this phase is actually for
+## The measurement that comes first
 
-Invariant 1 says the Core IR is arithmetization-agnostic — "a typed constraint
-graph, not an R1CS in disguise". Through phase 3 that claim has never been
-tested. There is exactly one lowering, so nothing would have gone wrong if the
-IR had quietly grown R1CS-shaped assumptions. An untested invariant is a
-hope.
+Phases 1–4 borrow a prover: lowered R1CS goes to arkworks' Groth16 over BN254.
+Phase 5 replaces that with a hand-written FRI/STARK prover — and a STARK wants
+the *opposite* field from a pairing-based SNARK. Groth16 needs a ~254-bit
+pairing-friendly field; FRI needs a *small* field with high two-adicity, so
+that the FFTs it is built on are cheap. Goldilocks, `p = 2^64 - 2^32 + 1`, is
+the canonical choice: it fits in a machine word, and `p - 1` is divisible by
+`2^32`, giving FFT domains up to a billion rows.
 
-Phase 4 adds a **second lowering from the same IR** and makes the two coexist.
-That is the whole point: not "we support Plonkish now" but "the neutrality
-claim is now falsifiable, and it survived". Everything upstream of the
-lowering — parser, elaborator, determinacy, optimizer, witness solver — must
-come through **completely unchanged**. If any of it needs a patch, we have
-found a genuine architectural defect, and finding it is a success too.
+The entire backend is generic over `ZkField` rather than tied to BN254 — an
+invariant maintained since phase 1 precisely for this moment. Before designing
+anything, that invariant was tested the way phase 4 tested IR neutrality:
+instantiate the existing lowerings over Goldilocks instead of BN254 and see
+whether anything breaks.
 
-## Decision: Plonkish, not a trace-based AIR
+Nothing does. `lower::<Goldilocks>` and `lower_plonkish::<Goldilocks>` compile
+and produce **identical constraint counts** to BN254 (IsZero: 2 and 2), and the
+field arithmetic checks out (`3 * 5 = 15` in the small field). So the frontend,
+the elaborator, the determinacy pass, both lowerings, the witness solver and
+the two checkers are all already field-agnostic in fact, not just in principle.
+Phase 5 does not touch any of them. It adds a field and a prover beneath them.
 
-The roadmap says "Plonkish/AIR". These are different targets and the choice
-matters, so: **Plonkish**, for three reasons.
+That is the shape of the whole phase, and it is worth stating plainly: **the
+new work is a leaf**, hung under an interface everything else already speaks.
 
-**Our circuits are combinational.** A trace-based AIR expresses constraints
-between *adjacent rows* of an execution trace — it is built for repeated
-computation (VM cycles, hash rounds), where one transition constraint covers
-thousands of steps. A combinational circuit has no time axis to repeat over,
-so lowering it to an AIR degenerates: every row is different and the
-transition constraint has to be a giant disjunction, or you pad to a trace
-that is mostly selector plumbing. AIR becomes the right target when the
-frontend can express loops, which is not before phase 6.
+## What a STARK actually requires
 
-**Plonkish is the natural second arithmetization for a gate graph.** Each IR
-node becomes a row, wiring becomes copy constraints. The mapping is direct
-enough to be obviously faithful, which is what we need for a differential
-test to mean something.
+A FRI-based STARK proves that a committed set of polynomials satisfies a set of
+constraints, using no trusted setup and only a hash function for its
+cryptography. The pieces, and which we already have:
 
-**It is what phase 5 wants.** Phase 5 is FRI over Goldilocks. The
-best-established design in exactly that space — Plonkish arithmetization,
-FRI, Goldilocks — already exists as prior art (Plonky2), so choosing
-Plonkish now means phase 5 replaces the prover without also replacing the
-arithmetization. Choosing AIR would put a second rewrite between here and a
-working FRI prover.
+* **A small field with high two-adicity.** *New.* A hand-written Goldilocks —
+  the reason the phase exists.
+* **An arithmetization as polynomials over an evaluation domain.** *Have it,
+  mostly.* Phase 4's Plonkish is exactly a table of rows with a gate identity
+  and a permutation (copy) argument — the STARK-friendly shape. This is why
+  phase 4 chose Plonkish over R1CS: a STARK proves the Plonkish circuit almost
+  directly, whereas R1CS would need re-expressing.
+* **Low-degree extension and FFT.** *New.* Interpolate each column over a coset,
+  evaluate on a larger domain.
+* **A commitment: Merkle trees over a hash.** *New.* Commit to the column
+  evaluations; FRI queries open a few leaves.
+* **FRI itself.** *New.* The low-degree test that makes the whole thing a
+  succinct argument.
+* **Fiat–Shamir.** *New.* A transcript that turns the interactive protocol
+  non-interactive by deriving the verifier's challenges from a hash of
+  everything committed so far.
 
-*Overridable:* if the goal is to prepare a zkVM rather than a circuit
-compiler, AIR is the better bet and this decision flips.
+Only the field and the STARK machinery are new. The circuit reaching the prover
+is the Plonkish one phase 4 already builds, validates, and self-checks.
 
-## What it costs — measured, and the reason it is interesting
+## Decision: build the field, borrow the hash, build FRI
 
-The two arithmetizations have genuinely different bills, which is the payoff
-of keeping the IR neutral. The trade is sharp:
+Three sub-choices, each marked.
 
-* **R1CS** — a constraint is `⟨a,w⟩·⟨b,w⟩ = ⟨c,w⟩`. Unlimited linear terms
-  are *free* (they fold into a linear combination); exactly **one
-  multiplication** per constraint.
-* **Plonkish** — a row is `q_L·a + q_R·b + q_O·c + q_M·a·b + q_C = 0`. It
-  holds a multiplication *and* linear terms *and* a constant at once, but it
-  sees only **three cells**.
+**The field is hand-written.** This is the point of the phase and the one place
+"borrow it" would defeat the purpose — the whole roadmap is *own* language,
+*own* arithmetization, *own* prover. Goldilocks arithmetic is also genuinely
+small: addition, multiplication with the special-form reduction that makes this
+prime fast, inversion, and the two-adic roots of unity FFT needs. It implements
+the existing `ZkField` trait plus a `TwoAdicField` extension for the roots, and
+everything upstream keeps working by construction.
 
-So each wins where the other is weak. Measured on circuits already in the
-repo (R1CS numbers from the backend; Plonkish projected from the gate shape):
+**The hash is borrowed, at first.** A STARK's security rests on its hash, and a
+hand-rolled hash is exactly the kind of thing that should not be trusted
+without cryptographic review. The prover is written against a `Hasher` trait
+and instantiated with a vetted arithmetic-friendly hash (Poseidon or
+Rescue-Prime over Goldilocks) from a reviewed crate. Swapping in a hand-written
+one later is a leaf change, the same way this whole phase is. *Overridable:* if
+the goal is zero dependencies over speed, the hash can be hand-written too, at
+the cost of taking on its analysis.
 
-| circuit | shape | R1CS | Plonkish |
-|---|---|---|---|
-| `IsZero` | 2 mul, 1 linear, 2 assertions | 2 | 2 |
-| `ManyMul` | 8 independent products | 8 | 8 |
-| `WideSum` | `z == a+b+c+d+e+f` | **1** | **~5** |
-
-`WideSum` is the honest discriminator: six summands fold into a single R1CS
-linear combination, but a three-cell gate has to chain them across rows.
-Conversely Plonkish gains where R1CS cannot follow at all — custom gates that
-verify a whole hash round in one row — though that only pays off once the
-gadget standard library exists.
-
-Two consequences worth stating now. First, **a naive node-per-row lowering is
-about twice as expensive as R1CS** on our examples, so Plonkish needs its own
-fusion, and it is a *different* fusion from Workstream C's: C folded a
-multiplication into an assertion because R1CS has a spare product slot;
-Plonkish folds because a gate has spare linear slots. Same IR, same intent,
-different arithmetic reason. Second, the compiler will for the first time be
-able to answer "which arithmetization is cheaper for *this* circuit" with a
-number instead of a preference.
+**FRI is hand-written.** It is the intellectual core of the phase and the thing
+worth understanding end to end; borrowing it would hollow the exercise out.
 
 ## Workstreams
 
-### D — The Plonkish arithmetization
+### G — Goldilocks
 
-**D.1 — Target and lowering.** A `plonkish.rs` in `zkc-core`, parallel to
-`r1cs.rs`: witness columns `a, b, c`, selector columns `q_L, q_R, q_O, q_M,
-q_C`, rows, and an explicit set of **copy constraints** (cell ≡ cell) standing
-in for the permutation argument. Then `lower_plonkish(&Ir) -> Plonkish<F>`
-from the same `Ir` the R1CS lowering consumes. Generic over the field, as
-everything in this crate is.
+**G.1 — The field.** *Done.* `goldilocks.rs`: a `ZkField` impl over a reduced
+`u64`, with the special-form reduction that makes this prime fast (`2^64 ≡
+2^32 - 1`, so a 128-bit product folds with a few word ops and no division),
+Fermat inversion, and `pow`. It is differentially tested against an
+independent arkworks Goldilocks on 50,000+ random inputs per operation, biased
+toward the hard cases near 0 and near `p`, plus the worst products near
+`(p-1)²` where a reduction bug would hide. The reference is test-only. The
+existing R1CS and Plonkish lowerings, instantiated over this hand-written
+field, produce identical counts to BN254 — the leaf really is a leaf.
 
-**D.2 — Gate fusion.** The Plonkish-native cost optimization: fold each
-assertion, and the multiplication or linear terms feeding it, into as few rows
-as the three-cell budget allows. Reported against an unfused baseline, exactly
-as Workstream C did, so the win is a measured delta.
+**G.2 — Two-adicity and FFT.** *Done.* A `TwoAdicField` extension trait
+(`TWO_ADICITY = 32`, `two_adic_generator`) and `fft.rs`: iterative
+Cooley–Tukey `ntt`/`intt` and a `coset_lde`, all generic over `TwoAdicField`
+so nothing names Goldilocks. Pinned by the properties that define an FFT: the
+generators have exactly the claimed order (`g^(2^(k-1)) = -1`), inverse-undoes-
+forward round-trips to `n = 2^12`, the forward transform agrees with Horner
+evaluation point by point, and the LDE's extended evaluations match evaluating
+the same polynomial at the coset points — a redundant encoding, not a
+different function.
 
-### E — Trust: checking and differential equivalence
+### H — Commitment and transcript
 
-**E.1 — Satisfiability and well-formedness.** *Done.* Two checks, not one.
-`Plonkish::is_satisfied(assignment)` is the analogue of `R1cs::is_satisfied`:
-every gate identity holds, and every copy constraint relates two cells that
-actually agree. But that only answers "does this witness satisfy the circuit",
-and a lowering bug that wired nothing together would pass it on the honest
-witness while being silently unsound. So `Plonkish::validate()` answers the
-prior question — "is this a well-formed circuit at all" — with no witness in
-sight: selectors match their cells, every shared wire's occurrences are a
-single connected component under the copy relation, and every public input
-reaches a cell. The wiring check is the one that matters, and two tests break
-a real lowering (drop a copy constraint; switch on a selector over an empty
-cell) and require the break to be caught, because a validator that only ever
-passes is decoration. Violations describe themselves in source terms, as the
-R1CS checker does.
+**H.1 — Merkle commitment.** *Done.* `merkle.rs`: a `MerkleTree` over the
+`Hasher` trait, padding to a power of two so paths are uniform, with `open` and
+a standalone `verify_opening` a root-only verifier can run. The security is all
+in the opening, so the tests are: every honest opening verifies, and a tampered
+one is rejected three ways — a forged leaf, a corrupted sibling, and a leaf
+claimed at the wrong index. A changed leaf changes the root, so the root binds
+the whole vector.
 
-**E.2 — Differential equivalence.** *Done.* The centrepiece: two independently
-written lowerings must encode the **same statement**, not merely both be
-satisfiable somewhere. For the same IR and the same solved witness — the
-witness solver runs on the IR and is shared unchanged, so "same witness" is
-literal, not approximate — the verdicts must agree assignment by assignment.
-Checked where it matters (the honest witness, accepted by both; the phase-0
-forgery, rejected by both; the broken circuit, under-constrained in both) and
-then stress-tested with 1200 random consistent witnesses across four circuits.
+**H.2 — Fiat–Shamir transcript.** *Done.* `transcript.rs`: a `Transcript` over
+the `Hasher`, domain-separated at construction, with `absorb`/`absorb_digest`
+and `challenge`/`challenges`/`challenge_index`. A counter is mixed into each
+squeeze so successive challenges from one commitment differ (FRI needs several
+query positions). Tested on the property soundness rests on: replaying the same
+messages yields the same challenges, and changing *any* absorbed message — its
+value, its order, or the domain separator — changes every subsequent challenge.
 
-The random test **found something**, which is the point of differential
-testing. Perturbing a *computed* wire to a value inconsistent with its inputs
-splits the two: R1CS never reads such a wire (it recomputes `a·b` from the
-argument cells), while Plonkish places the product in a cell and checks
-`a·b - c = 0`, so it catches the inconsistency. Both lowerings are correct;
-they encode "the solver already computed the intermediates" differently. The
-resolution is that the free variables are the **atoms** — inputs and advice —
-because the shared witness solver, not the assignment, is the arbiter of every
-intermediate value. Perturb the atoms and re-solve, and the two agree without
-exception. (See DESIGN_DECISIONS.)
+Both are written against a `Hasher` trait (`hash.rs`) and tested through a
+transparent stand-in permutation (`x^7` sbox) that carries no security claim of
+its own; the reviewed arithmetic hash is the leaf swap the plan defers. Nothing
+in the tree or the transcript names a concrete hash.
 
-### F — The payoff: measuring neutrality
+### I — The STARK
 
-**F.1 — Cost comparison.** *Done.* A `zkc-stats` binary (in `zkc-prove`, but
-sharing nothing with the proving path — no Groth16, just lower-and-count)
-measures an IR as both arithmetizations and prints the two bills side by side:
-R1CS constraints and variables against Plonkish rows, copy constraints and
-columns, each with its unfused baseline so the fusion saving is a real delta,
-and a per-circuit verdict on which is cheaper. Text for humans, `--json` for
-diffing across runs or against Circom. The crossover is what it exists to
-show: `ManyMul` and `IsZero` tie, `WideSum` goes to R1CS — neither
-arithmetization dominates, which is exactly the invariant paying rent. The
-measurement logic is a library function, pinned by tests; the binary is a thin
-shell over it.
+**I.1 — Plonkish to AIR-style constraints.** *Done.* `air.rs`: the Plonkish
+table becomes polynomials. Interpolating the three witness columns and five
+selectors over a size-`n` domain turns the per-row gate identity into a single
+polynomial `C(x) = q_L·a + q_R·b + q_O·c + q_M·a·b + q_C`, and "the gate holds
+on every row" becomes "`C` vanishes on the domain", i.e. `C` is divisible by
+`Z_H(x) = x^n - 1`. Verified directly: on an honest witness the quotient
+`Q = C/Z_H` has no high-degree coefficients and `Q·Z_H = C` at a random point.
+The copy constraints are built into the AIR as a permutation `σ` over cell
+positions (union-find over the equality classes), and — as of the wiring
+hardening — enforced in the proof by a grand-product permutation argument
+(see I.2).
 
-**F.2 — Selecting an arithmetization.** *Done.* `zkc-prove --arith r1cs|plonkish`
-builds a circuit either way. `r1cs` goes all the way to a Groth16 proof;
-`plonkish` lowers, runs the E.1 validation and the witness self-check, and
-stops — there is no Plonkish prover yet, so it goes exactly as far as R1CS did
-in phase 0. The choice lives in the backend, at lowering time, because the
-frontend emits the neutral IR and must not know which arithmetization follows —
-the phase-4 invariant. And the determinacy record is printed identically on
-both paths, from the same field in the same IR: a test asserts the two lines
-are byte-for-byte equal. Soundness is a property of the circuit, inherited by
-whichever arithmetization is chosen, and the phase-0 forgery is rejected by
-both at the same assertion — demonstrated, not asserted.
+**I.2 — FRI prover and verifier.** *Done.* `fri.rs` is the low-degree test —
+Cooley–Tukey folding with a verifier challenge each round, Merkle commitment
+per layer, and a query phase that checks the fold chain and openings; tested so
+that an honest low-degree polynomial passes and a high-degree one is rejected.
+`stark.rs` composes it: commit the trace, form `Q = C/Z_H`, FRI-prove `Q` is
+low-degree, and check `C = Q·Z_H` at the queried points against the opened
+trace and verifier-computed selectors, all bound by a Fiat–Shamir transcript.
+The end-to-end tests are the phase's payoff and use no arkworks: **an honest
+witness proves and verifies, and the phase-0 forgery yields no accepted proof**
+— caught because the forgery is a gate violation, so `Q` is not a polynomial
+and the consistency check fails. A property test also found and fixed a real
+verifier weakness (a proof must carry exactly the configured number of FRI
+queries, not fewer).
 
-**Order: D → E → F.** E cannot precede D, and F needs both. E should not be
-deferred — an unchecked second lowering is worth less than no second lowering,
-because it invites trust it has not earned.
+*Wiring hardening (done):* the STARK now also enforces the **wiring**, via a
+PLONK-style grand-product permutation argument over `σ`. A grand-product column
+`Z` is committed alongside the trace; two constraints (`Z` starts at 1, and the
+recursion `Z(ωx)·g - Z(x)·f = 0`) force every `σ`-cycle to hold a single value.
+A dedicated test builds a circuit whose gates are trivially satisfied (all
+selectors zero) but whose two cells are wired together, and checks that a trace
+putting different values in them is **rejected** — the case the gate constraint
+alone would accept.
+
+*The one boundary left explicit:* binding the committed trace and `Z` columns
+to low degree via a FRI batch (DEEP). FRI here proves the composite quotient is
+low-degree; the trace and `Z` are committed and opened for the consistency
+check but not themselves folded into the low-degree test. This is the standard
+next hardening; it does not affect the honest, forgery, or wiring results, and
+is marked plainly in the tradition of this project's honest partials
+(Workstream C.2, the cvc5 finite-field limitation).
+
+**Order: G → H → I.** Each needs the last. G is testable in complete isolation
+(a field is a field); H needs G's FFT for nothing but is cleaner built on the
+tested field; I needs both.
+
+## What it costs, and how we will know
+
+Phase 4's `zkc-stats` already reports Plonkish rows, which is the STARK's trace
+length — so the cost model is in place before the prover is. Phase 5 adds the
+numbers a STARK is actually judged on: proof size, prover time, verifier time,
+each as a function of trace length. The comparison against the Groth16 baseline
+is the honest one — Groth16 proofs are tiny and verification is constant-time,
+while a STARK trades larger proofs for no trusted setup and a hash-only trust
+assumption. The point is not that one wins but that the compiler can now put
+both on the table, the same way phase 4 put two arithmetizations on the table.
 
 ## Scope, drawn on purpose
 
-- **No Plonkish prover.** Phase 4 stops at lowered, checked, and measured —
-  mirroring how R1CS entered in phase 0, a satisfiability checker before any
-  cryptography. Proving is phase 5.
-- **Copy constraints are checked, not argued.** A real Plonk prover enforces
-  them with a permutation polynomial and a grand-product argument. Here they
-  are an explicit relation, verified directly. Building the permutation
-  argument is prover work.
-- **Generic gate only.** Custom gates are where Plonkish decisively beats
-  R1CS, but they only pay for circuits like hash rounds, which need the gadget
-  standard library still carried over from phase 3.
-- **Field stays a parameter.** Testing continues on BN254; the concrete
-  Goldilocks implementation arrives with phase 5's prover, against the same
-  `ZkField` trait.
-- **The frontend does not change.** If it turns out it must, that is a finding
-  to report, not a patch to slip in.
+- **No recursion.** Proofs about proofs are phase 7. Phase 5 proves circuits.
+- **The hash is a dependency, deliberately.** See the decision above; a
+  hand-written hash without review would be the least trustworthy line in the
+  system.
+- **The reference field is a test-only dependency.** Goldilocks-from-arkworks
+  exists in phase 5 solely as the oracle the hand-written field is
+  differentially tested against, exactly as `ark-bn254` is a dev-dependency
+  today. It is never in a shipped path.
+- **Performance is correctness-first.** The FFT and FRI are written to be
+  obviously right before they are written to be fast; the roadmap's profiler
+  (phase 6) is where speed gets systematic attention.
+- **The frontend does not change — again.** The measurement at the top is the
+  evidence it will not have to. If it does, that is a finding, not a patch.
 
 ## What "done" looks like
 
-1. The same IR lowers to R1CS and to Plonkish, both checkable.
-2. An honest witness satisfies both; the phase-0 forgery is rejected by both.
-3. Fusion reduces Plonkish rows by a measured amount.
-4. A cost table showing where the two arithmetizations disagree.
-5. **Not one line of the frontend changed.**
-
-All five hold. The neutrality invariant was falsifiable for the first time in
-this phase, and it survived: two arithmetizations, lowered and checked from one
-IR, agreeing on every witness and disagreeing only on cost — with the frontend
-untouched throughout.
+1. A hand-written Goldilocks field passing a differential test against the
+   reference, implementing `ZkField` so the rest of the compiler is unchanged.
+2. An FFT/LDE whose round-trip and known-answer properties hold.
+3. A Merkle commitment and a Fiat–Shamir transcript, each with a tamper test.
+4. A FRI prover and verifier: the honest witness proves and verifies; the
+   phase-0 forgery does not.
+5. arkworks removed from the proving path, present only as a test oracle.
+6. Proof-size and timing numbers alongside the Groth16 baseline.
+7. **Not one line of the frontend changed.**
