@@ -172,3 +172,41 @@ exists.
 Correctness travels with cost, as in Workstream C: tests check that the fused
 circuit accepts the honest witness and rejects a forged output, so the row
 count never falls by weakening the circuit.
+
+---
+
+# Cost comparison — phase 4, Workstream F.1
+
+`zkc-stats` lowers an IR both ways and prints the two bills. It is the neutral
+IR paying rent: the same graph, two arithmetizations, a per-circuit answer to
+which is cheaper.
+
+```bash
+cargo build --manifest-path backend/Cargo.toml --bin zkc-stats
+backend/target/debug/zkc-stats build/*.ir.json          # human-readable
+backend/target/debug/zkc-stats build/*.ir.json --json   # one object per line
+```
+
+Measured across the repo's circuits (fused counts):
+
+| circuit | R1CS constraints | Plonkish rows | copies | cheaper |
+|---|---|---|---|---|
+| `relation` | 1 | 1 | 0 | tie |
+| `mul_square` | 2 | 2 | 2 | tie |
+| `IsZero` | 2 | 2 | 2 | tie |
+| `divide` | 2 | 2 | 1 | tie |
+| `ManyMul` (8) | 8 | 8 | 0 | tie |
+| `WideSum` | 1 | 5 | 4 | **R1CS** |
+
+The headline is the last column, and specifically that it is not constant.
+Fusion brings Plonkish level with R1CS on everything multiplication-shaped;
+`WideSum` is the one circuit where R1CS's free linear algebra wins and no gate
+fusion can catch up. **Neither arithmetization dominates** — which is the
+entire justification for keeping the Core IR arithmetization-agnostic. Had one
+always won, the neutrality would have been an expensive gesture; because the
+answer is per-circuit, the compiler now has a real decision to make, and F.2
+is what lets a user act on it.
+
+The tool reports Plonkish copy constraints as a first-class number because they
+are a cost with no R1CS counterpart — a real prover pays for them in the
+permutation argument — and fusion drives them down too (`ManyMul` to zero).

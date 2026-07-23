@@ -138,15 +138,29 @@ exception. (See DESIGN_DECISIONS.)
 
 ### F — The payoff: measuring neutrality
 
-**F.1 — Cost comparison.** Extend the benchmark harness to report both bills
-per circuit — R1CS constraints/variables against Plonkish rows/columns —
-including the crossover cases above. This is the invariant paying rent.
+**F.1 — Cost comparison.** *Done.* A `zkc-stats` binary (in `zkc-prove`, but
+sharing nothing with the proving path — no Groth16, just lower-and-count)
+measures an IR as both arithmetizations and prints the two bills side by side:
+R1CS constraints and variables against Plonkish rows, copy constraints and
+columns, each with its unfused baseline so the fusion saving is a real delta,
+and a per-circuit verdict on which is cheaper. Text for humans, `--json` for
+diffing across runs or against Circom. The crossover is what it exists to
+show: `ManyMul` and `IsZero` tie, `WideSum` goes to R1CS — neither
+arithmetization dominates, which is exactly the invariant paying rent. The
+measurement logic is a library function, pinned by tests; the binary is a thin
+shell over it.
 
-**F.2 — Selecting an arithmetization.** A `--arith r1cs|plonkish` path through
-the CLI and the emitted artifact, so a circuit can actually be built either
-way. The determinacy record travels unchanged: soundness is a property of the
-IR, not of how it is arithmetized, and that is worth demonstrating rather than
-asserting.
+**F.2 — Selecting an arithmetization.** *Done.* `zkc-prove --arith r1cs|plonkish`
+builds a circuit either way. `r1cs` goes all the way to a Groth16 proof;
+`plonkish` lowers, runs the E.1 validation and the witness self-check, and
+stops — there is no Plonkish prover yet, so it goes exactly as far as R1CS did
+in phase 0. The choice lives in the backend, at lowering time, because the
+frontend emits the neutral IR and must not know which arithmetization follows —
+the phase-4 invariant. And the determinacy record is printed identically on
+both paths, from the same field in the same IR: a test asserts the two lines
+are byte-for-byte equal. Soundness is a property of the circuit, inherited by
+whichever arithmetization is chosen, and the phase-0 forgery is rejected by
+both at the same assertion — demonstrated, not asserted.
 
 **Order: D → E → F.** E cannot precede D, and F needs both. E should not be
 deferred — an unchecked second lowering is worth less than no second lowering,
@@ -177,3 +191,8 @@ because it invites trust it has not earned.
 3. Fusion reduces Plonkish rows by a measured amount.
 4. A cost table showing where the two arithmetizations disagree.
 5. **Not one line of the frontend changed.**
+
+All five hold. The neutrality invariant was falsifiable for the first time in
+this phase, and it survived: two arithmetizations, lowered and checked from one
+IR, agreeing on every witness and disagreeing only on cost — with the frontend
+untouched throughout.

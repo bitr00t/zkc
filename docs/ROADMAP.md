@@ -16,7 +16,7 @@ Two invariants hold at every phase:
 | 1 | Walking skeleton: source → typed IR → R1CS → witness → Groth16 proof, end to end | **done** |
 | 2 | The type system: `output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting | **done** |
 | 3 | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | **done** (see `README_phase3.md`; the gadget stdlib and the Circom benchmark carry over) |
-| 4 | Own arithmetization: Plonkish/AIR lowering from the same Core IR | |
+| 4 | Own arithmetization: Plonkish/AIR lowering from the same Core IR | **done** (see `docs/phase4.md`) |
 | 5 | Own prover: FRI over Goldilocks, replacing arkworks | |
 | 6 | Tooling: language server, constraint-count profiler, gadget standard library | |
 | 7 | Recursion and formal verification of the lowering | |
