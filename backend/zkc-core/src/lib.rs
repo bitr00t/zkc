@@ -11,6 +11,7 @@ pub mod fft;
 pub mod fri;
 pub mod goldilocks;
 pub mod hash;
+pub mod poseidon;
 pub mod merkle;
 pub mod stark;
 pub mod transcript;
