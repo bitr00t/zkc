@@ -6,6 +6,14 @@
 //! touch this crate, only which backend consumes its output.
 
 pub mod field;
+pub mod air;
+pub mod fft;
+pub mod fri;
+pub mod goldilocks;
+pub mod hash;
+pub mod merkle;
+pub mod stark;
+pub mod transcript;
 pub mod ir;
 pub mod lower;
 pub mod plonkish;
