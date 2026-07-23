@@ -56,6 +56,22 @@ pub trait ZkField: Copy + PartialEq + core::fmt::Debug {
     fn to_decimal(self) -> String;
 }
 
+/// A field with a large power-of-two multiplicative subgroup.
+///
+/// FFT — and therefore FRI, and therefore the phase-5 prover — needs a
+/// primitive `2^k`-th root of unity to build an evaluation domain of size
+/// `2^k`. Not every field has one: Goldilocks does (`2^32 | p - 1`), a
+/// 254-bit pairing field essentially does not, which is the whole reason the
+/// two phases use different fields. This extension trait is what the FFT is
+/// written against, so the FFT never names a concrete field either.
+pub trait TwoAdicField: ZkField {
+    /// The largest `k` with a primitive `2^k`-th root of unity.
+    const TWO_ADICITY: u32;
+
+    /// A primitive `2^bits`-th root of unity. Requires `bits <= TWO_ADICITY`.
+    fn two_adic_generator(bits: u32) -> Self;
+}
+
 impl<F: PrimeField> ZkField for F {
     fn zero() -> Self {
         <F as ark_ff::Zero>::zero()
