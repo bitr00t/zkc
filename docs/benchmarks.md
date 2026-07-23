@@ -210,3 +210,38 @@ is what lets a user act on it.
 The tool reports Plonkish copy constraints as a first-class number because they
 are a cost with no R1CS counterpart — a real prover pays for them in the
 permutation argument — and fusion drives them down too (`ManyMul` to zero).
+
+---
+
+# Phase 5 — STARK vs the Groth16 baseline
+
+The phase-4 cost model reported constraint and row counts; phase 5 adds the
+numbers a proof system is actually judged on. Measured on the `IsZero` circuit,
+honest witness — the hand-written FRI-STARK over Goldilocks (with the stand-in
+hash, `blowup = 4`, 32 queries) against the borrowed arkworks Groth16 over
+BN254:
+
+| | Groth16 (BN254) | zkc STARK (Goldilocks) |
+|---|---|---|
+| proof size | **128 bytes** | ~25,000 bytes |
+| prover time | 21.7 ms | **1.1 ms** |
+| verifier time | 58.9 ms | **2.0 ms** |
+| trusted setup | required | **none** |
+| trust assumption | pairing + toxic waste | a hash |
+
+The trade is exactly the textbook one, and worth stating rather than
+editorialising. **Groth16 wins proof size by two orders of magnitude** — a
+pairing-based SNARK is constant-size and tiny, and nothing FRI does will match
+128 bytes. **The STARK wins setup and speed:** no trusted ceremony, no toxic
+waste, only a hash for its cryptography, and on a circuit this small the
+absence of a pairing setup and pairing checks makes it far quicker end to end.
+
+Two honest caveats on the numbers. The timings are on a tiny circuit, where
+Groth16's fixed pairing costs dominate; at realistic circuit sizes the picture
+shifts (Groth16 prover time grows with the circuit, STARK proof size grows
+polylogarithmically), and phase 6's profiler is where that curve gets mapped.
+And the STARK proof size here is inflated by the stand-in hash's width-1
+digests and an unoptimised opening format; a real arithmetic hash and shared
+Merkle caps would cut it. The point is not the exact ratio but that the
+compiler can now put both systems on the table — the same move phase 4 made for
+two arithmetizations, one level down.

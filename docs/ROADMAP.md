@@ -17,7 +17,7 @@ Two invariants hold at every phase:
 | 2 | The type system: `output` vs `public`, advice quarantined in gadgets, determinacy proved by linear propagation + case splitting | **done** |
 | 3 | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | **done** (see `README_phase3.md`; the gadget stdlib and the Circom benchmark carry over) |
 | 4 | Own arithmetization: Plonkish/AIR lowering from the same Core IR | **done** (see `docs/phase4.md`) |
-| 5 | Own prover: FRI over Goldilocks, replacing arkworks | |
+| 5 | Own prover: FRI over Goldilocks, replacing arkworks | **done** (see `docs/phase5.md`, `docs/phase5-status.md`) |
 | 6 | Tooling: language server, constraint-count profiler, gadget standard library | |
 | 7 | Recursion and formal verification of the lowering | |
 
@@ -73,3 +73,29 @@ forgery must be rejected by both. Phase 4 stops there — lowered, checked and
 measured, with no Plonkish prover — mirroring how R1CS entered in phase 0.
 
 See `docs/phase4.md` for the full design note.
+
+## Phase 5 in detail
+
+**A hand-written FRI/STARK prover over Goldilocks, replacing arkworks.** A
+STARK wants the opposite field from the pairing-based Groth16 borrowed so far:
+not a ~254-bit pairing-friendly field but a small, high-two-adicity one, so its
+FFTs are cheap. Goldilocks (`2^64 - 2^32 + 1`) fits in a machine word and has
+`2^32 | p - 1`.
+
+The whole backend has been generic over `ZkField` since phase 1 for exactly
+this. Before designing the phase, that was tested: instantiating the existing
+lowerings over Goldilocks instead of BN254 compiles and produces identical
+constraint counts, so the frontend, both lowerings, the witness solver and the
+checkers are already field-agnostic in fact. **The new work is a leaf** — a
+field and a prover hung under an interface everything else already speaks.
+
+Phase 4's Plonkish is why this is tractable: a STARK proves a table of rows
+with a gate identity and a permutation argument almost directly, which is what
+Plonkish already is. The pieces that are genuinely new are the small field
+(G), an FFT/LDE and Merkle+Fiat–Shamir commitment (G/H), and FRI itself (I).
+The hash is borrowed from a reviewed crate at first — a hand-rolled hash is the
+last thing that should go unaudited — while the field and FRI are hand-written,
+because they are the point. The end-to-end security test is the familiar one:
+the honest witness proves and verifies, the phase-0 forgery does not.
+
+See `docs/phase5.md` for the full design note.
