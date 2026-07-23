@@ -8,6 +8,10 @@ description = "Borrowed proving backend: feeds lowered R1CS to arkworks Groth16 
 name = "zkc-prove"
 path = "src/bin/zkc-prove.rs"
 
+[[bin]]
+name = "zkc-stats"
+path = "src/bin/zkc-stats.rs"
+
 [dependencies]
 zkc-core = { path = "../zkc-core" }
 ark-bn254 = "0.4"
