@@ -16,9 +16,13 @@ import Zkc.Analysis.Smt
 import Zkc.Core.Elaborate (elaborate, Elaborated(..))
 import Zkc.Core.Ir
 import Zkc.Core.Passes (optimize, Stats(..))
+import Zkc.Diagnose (diagnoseSource, hoverAt)
 import Zkc.Diagnostics
 import Zkc.Emit.Json (emitJson)
 import Zkc.Json (Json(..), encode, parse)
+import Zkc.Lsp
+  ( ServerState(..), initialState, handleMessage, diagnosticToLsp
+  , frame, utf8Length )
 import Zkc.Field (fieldModulus)
 import Zkc.Syntax.Ast
 import Zkc.Syntax.Lexer (lexer, Tok(..), Token(..))
@@ -272,6 +276,39 @@ requireBad = unlines
   ]
 
 -- Cases -----------------------------------------------------------------
+
+-- LSP test helpers: build JSON-RPC messages compactly.
+lspReq :: Integer -> String -> Json -> Json
+lspReq i method params =
+  JObj [ ("jsonrpc", JStr "2.0"), ("id", JInt i)
+       , ("method", JStr method), ("params", params) ]
+
+lspNote :: String -> Json -> Json
+lspNote method params =
+  JObj [ ("jsonrpc", JStr "2.0"), ("method", JStr method), ("params", params) ]
+
+lspTextDoc :: String -> String -> Json
+lspTextDoc uri text = JObj [ ("textDocument", JObj [ ("uri", JStr uri), ("text", JStr text) ]) ]
+
+-- | The single reply a handled message produces, encoded, for substring checks.
+lspReply :: Json -> String
+lspReply msg = case snd (handleMessage initialState msg) of
+  (r : _) -> encode r
+  [] -> ""
+
+-- | Open a document, then hover at a zero-based position; encode the reply.
+lspOpenThenHover :: String -> Int -> Int -> String
+lspOpenThenHover text line ch =
+  let uri = "file:///h.zkc"
+      (st1, _) = handleMessage initialState
+        (lspNote "textDocument/didOpen" (lspTextDoc uri text))
+      hoverReq = lspReq 7 "textDocument/hover"
+        (JObj [ ("textDocument", JObj [("uri", JStr uri)])
+              , ("position", JObj [("line", JInt (fromIntegral line))
+                                   , ("character", JInt (fromIntegral ch))]) ])
+  in case snd (handleMessage st1 hoverReq) of
+       (r : _) -> encode r
+       [] -> ""
 
 cases :: [(String, Bool)]
 cases =
@@ -735,6 +772,82 @@ cases =
     , let d = diagAtCol 2 7 "boom"
       in parseDiagnostic (renderJson d) == Right d
          && "\"col\":7" `isInfixOf` renderJson d )
+
+  -- Language server (phase 6, K) ----------------------------------------
+  , ( "lsp: initialize advertises full document sync and hover"
+    , let out = lspReply (lspReq 1 "initialize" (JObj []))
+      in "\"textDocumentSync\":1" `isInfixOf` out
+         && "\"hoverProvider\":true" `isInfixOf` out )
+
+  , ( "lsp: opening a broken document publishes a determinacy diagnostic"
+    , let broken = "circuit Bad { output out: field; assert out * out == out; }"
+          out = lspReply (lspNote "textDocument/didOpen" (lspTextDoc "file:///b.zkc" broken))
+      in "textDocument/publishDiagnostics" `isInfixOf` out
+         && "is not determined" `isInfixOf` out
+         && "\"severity\":1" `isInfixOf` out )
+
+  , ( "lsp: opening a determinate document publishes no diagnostics"
+    , let ok = "circuit C { public a: field; output z: field; assert z == a; }"
+          out = lspReply (lspNote "textDocument/didOpen" (lspTextDoc "file:///c.zkc" ok))
+      in "textDocument/publishDiagnostics" `isInfixOf` out
+         && "\"diagnostics\":[]" `isInfixOf` out )
+
+  , ( "lsp: didChange re-analyses the new text"
+    , let broken = "circuit Bad { output out: field; assert out * out == out; }"
+          change = JObj [ ("textDocument", JObj [("uri", JStr "file:///b.zkc")])
+                        , ("contentChanges", JArr [ JObj [("text", JStr broken)] ]) ]
+          out = lspReply (lspNote "textDocument/didChange" change)
+      in "publishDiagnostics" `isInfixOf` out && "is not determined" `isInfixOf` out )
+
+  , ( "lsp: closing a document clears its diagnostics"
+    , let out = lspReply (lspNote "textDocument/didClose"
+                            (JObj [("textDocument", JObj [("uri", JStr "file:///b.zkc")])]))
+      in "publishDiagnostics" `isInfixOf` out && "\"diagnostics\":[]" `isInfixOf` out )
+
+  , ( "lsp: an unknown request is answered with method-not-found"
+    , let out = lspReply (lspReq 9 "textDocument/rename" (JObj []))
+      in "\"error\"" `isInfixOf` out && "-32601" `isInfixOf` out )
+
+  , ( "lsp: an unknown notification is ignored (no reply)"
+    , null (snd (handleMessage initialState (lspNote "$/setTrace" (JObj [])))) )
+
+  , ( "lsp: a diagnostic maps to a zero-based LSP range"
+    , let out = encode (diagnosticToLsp (diagAtCol 2 3 "boom"))
+      in "\"line\":1" `isInfixOf` out && "\"character\":2" `isInfixOf` out
+         && "\"severity\":1" `isInfixOf` out )
+
+  , ( "lsp: Content-Length counts UTF-8 bytes, not characters"
+    , utf8Length "a\8212b" == 5                       -- em dash is 3 bytes
+      && ("Content-Length: " ++ show (utf8Length (encode (JStr "\8212"))))
+           `isInfixOf` frame (JStr "\8212") )
+
+  , ( "diagnose: source to diagnostics matches the CLI's determinacy verdict"
+    , length (diagnoseSource "bn254"
+        "circuit Bad { output out: field; assert out * out == out; }") == 1
+      && null (diagnoseSource "bn254"
+        "circuit C { public a: field; output z: field; assert z == a; }") )
+
+  -- Hover: surfacing the --explain proof (phase 6, K) -------------------
+  , ( "hover: a determinate output reports the proof, with its case splits"
+    , case hoverAt "bn254" isZero 8 12 of      -- 'out' is declared on line 8
+        Just md -> "proved determined" `isInfixOf` md
+                   && "Proof by cases" `isInfixOf` md
+                   && "x != 0" `isInfixOf` md
+        Nothing -> False )
+
+  , ( "hover: an under-constrained output reports why it is not determined"
+    , case hoverAt "bn254" "circuit Bad { output out: field; assert out * out == out; }" 1 15 of
+        Just md -> "not determined" `isInfixOf` md
+        Nothing -> False )
+
+  , ( "hover: a position with no output declaration yields nothing"
+    , hoverAt "bn254" "circuit C { public a: field; output z: field; assert z == a; }" 99 1
+        == Nothing )
+
+  , ( "lsp: hover threads through the open document and returns markdown"
+    , let out = lspOpenThenHover isZero 7 11    -- zero-based line of 'out'
+      in "\"kind\":\"markdown\"" `isInfixOf` out
+         && "proved determined" `isInfixOf` out )
 
   -- SMT escalation: the query, built without ever running a solver -----
   , ( "smt: the failing scope is named, so escalation asks about it alone"
