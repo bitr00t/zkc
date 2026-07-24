@@ -62,7 +62,7 @@ resultKinds def = Map.fromList
     boundNames s = case s of
       SLet n _ _ -> [n]
       SAdvice n _ _ -> [n]
-      SInstance bind _ _ _ -> bindNames bind
+      SInstance bind _ _ _ _ -> bindNames bind
       SAssert{} -> []
 
 bindNames :: InstanceBind -> [String]
@@ -98,7 +98,7 @@ orderGadgets :: [GadgetDef] -> Either Diagnostic [GadgetDef]
 orderGadgets gadgets = go [] Set.empty gadgets
   where
     byName = Map.fromList [ (gdName g, g) | g <- gadgets ]
-    callees g = nub [ n | SInstance _ n _ _ <- gdBody g ]
+    callees g = nub [ n | SInstance _ n _ _ _ <- gdBody g ]
 
     go done _ [] = Right (reverse done)
     go done onStack pending = case pickReady done pending of
@@ -149,7 +149,7 @@ circuit fieldName gadgetMap circ = do
   -- atoms are its inputs plus the result wires the instances handed back.
   let instanceResultWires = concatMap isResults (reverse (stInstances st))
       freshResultAtoms =
-        [ IrInput w (nameFor st w) Private 0
+        [ IrInput w (nameFor st w) Private 0 0
         | w <- instanceResultWires
         , w `notElem` map iiWire inputs ]
       ir = Ir
@@ -171,7 +171,7 @@ circuit fieldName gadgetMap circ = do
   checkAdviceIsUsed ir
   Right (ir, body)
   where
-    mkInput wire param = IrInput wire (pdName param) (pdVisibility param) (pdLine param)
+    mkInput wire param = IrInput wire (pdName param) (pdVisibility param) (pdLine param) (pdCol param)
     nameFor st w = maybe ("wire" ++ show w) id
       (lookup w [ (v, k) | (k, v) <- Map.toList (stEnv st) ])
 
@@ -225,7 +225,7 @@ goStmt gadgetMap enclosing st stmt = case stmt of
                 , stOwnNodes = node : stOwnNodes st1
                 , stEnv = Map.insert name wire (stEnv st1) }
 
-  SAssert lhs rhs line -> do
+  SAssert lhs rhs line _ -> do
     (lw, st1) <- goExpr st lhs
     (rw, st2) <- goExpr st1 rhs
     let label = renderExpr lhs ++ " == " ++ renderExpr rhs
@@ -233,7 +233,7 @@ goStmt gadgetMap enclosing st stmt = case stmt of
     Right st2 { stFlatAsserts = a : stFlatAsserts st2
               , stOwnAsserts = a : stOwnAsserts st2 }
 
-  SInstance bind gadgetName args line ->
+  SInstance bind gadgetName args line _ ->
     instantiate gadgetMap enclosing st bind gadgetName args line
 
 -- | Inline one instantiation into the flat IR and record its site.
@@ -379,8 +379,8 @@ gadgetBody gadgetMap def = do
       atomWires = [ length params + 1 .. length params + length atomResults ]
       -- Atoms carry the gadget's own line, so a failed obligation inside a
       -- definition points at the definition rather than at line 1.
-      paramInputs = [ IrInput w n Private (gdLine def) | (w, n) <- zip paramWires params ]
-      atomInputs = [ IrInput w n Output (gdLine def) | (w, n) <- zip atomWires atomResults ]
+      paramInputs = [ IrInput w n Private (gdLine def) 0 | (w, n) <- zip paramWires params ]
+      atomInputs = [ IrInput w n Output (gdLine def) 0 | (w, n) <- zip atomWires atomResults ]
       env0 = Map.fromList (zip params paramWires ++ zip atomResults atomWires)
       st0 = St { stNext = 1 + length params + length atomResults, stEnv = env0
                , stFlatNodes = [], stFlatAsserts = []
@@ -390,7 +390,7 @@ gadgetBody gadgetMap def = do
   requireWires <- mapM (requireWire params paramWires) (gdRequires def)
   let instanceResultWires = concatMap isResults (reverse (stInstances st))
       instanceAtoms =
-        [ IrInput w ("_r" ++ show w) Private 0
+        [ IrInput w ("_r" ++ show w) Private 0 0
         | w <- instanceResultWires, w `notElem` (paramWires ++ atomWires) ]
   Right Body
     { bodyParams = paramWires
@@ -454,13 +454,13 @@ goSkelStmt gadgetMap def st stmt = case stmt of
               , stOwnNodes = node : stOwnNodes st1
               , stEnv = Map.insert name wire (stEnv st1) }
 
-  SAssert lhs rhs line -> do
+  SAssert lhs rhs line _ -> do
     (lw, st1) <- goExpr st lhs
     (rw, st2) <- goExpr st1 rhs
     let label = renderExpr lhs ++ " == " ++ renderExpr rhs
     Right st2 { stOwnAsserts = Assertion lw rw label line : stOwnAsserts st2 }
 
-  SInstance bind calleeName args line -> do
+  SInstance bind calleeName args line _ -> do
     callee <- case Map.lookup calleeName gadgetMap of
       Just d -> Right d
       Nothing -> Left $ diagAt line ("unknown gadget '" ++ calleeName ++ "'")

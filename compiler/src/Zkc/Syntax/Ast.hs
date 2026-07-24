@@ -51,6 +51,7 @@ data ParamDecl = ParamDecl
   { pdName :: String
   , pdVisibility :: Visibility
   , pdLine :: Int
+  , pdCol :: Int          -- ^ column of the declaration, for a caret (J.2)
   } deriving (Eq, Show)
 
 -- | Hint functions usable on the right of @advice@.
@@ -92,7 +93,7 @@ data Stmt
   -- not determined until some assertion pins it down.
   | SAdvice String Hint Int
   -- | @assert lhs == rhs;@ — emits a constraint.
-  | SAssert Expr Expr Int
+  | SAssert Expr Expr Int Int   -- ^ lhs, rhs, line, column (J.2)
   -- | A gadget instantiation. Either
   --
   --   * @(o, ..) = g(args);@   — bind results to already-declared outputs
@@ -101,7 +102,7 @@ data Stmt
   --
   -- The call is inlined at elaboration with a fresh scope. Determinacy does
   -- /not/ re-expand it: the gadget's proved summary is applied instead.
-  | SInstance InstanceBind String [Expr] Int
+  | SInstance InstanceBind String [Expr] Int Int  -- ^ .., line, column (J.2)
   deriving (Eq, Show)
 
 -- | How an instance binds its results.

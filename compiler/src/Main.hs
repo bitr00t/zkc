@@ -32,6 +32,10 @@ import Zkc.Emit.Json (emitJson)
 import Zkc.Field (fieldModulus, knownFields)
 import Zkc.Syntax.Parser (parseProgram)
 
+-- | How diagnostics are printed: for a human to read, or as one JSON object
+-- per diagnostic for an editor or language server to consume.
+data ErrorFormat = HumanErrors | JsonErrors
+
 data Options = Options
   { optInput :: FilePath
   , optOutput :: Maybe FilePath
@@ -40,6 +44,7 @@ data Options = Options
   , optQuiet :: Bool
   , optExplain :: Bool
   , optSmt :: SmtConfig
+  , optErrorFormat :: ErrorFormat
   }
 
 defaultOptions :: FilePath -> Options
@@ -51,6 +56,7 @@ defaultOptions input = Options
   , optQuiet = False
   , optExplain = False
   , optSmt = defaultSmtConfig
+  , optErrorFormat = HumanErrors
   }
 
 main :: IO ()
@@ -86,14 +92,26 @@ parseOptions opts ("--smt-timeout" : seconds : rest) =
     _ -> Left ("--smt-timeout expects a number of seconds, got '" ++ seconds ++ "'")
 parseOptions opts ("--dump-smt" : path : rest) =
   parseOptions opts { optSmt = (optSmt opts) { smtDump = Just path } } rest
+parseOptions opts ("--error-format" : name : rest) =
+  case name of
+    "human" -> parseOptions opts { optErrorFormat = HumanErrors } rest
+    "json"  -> parseOptions opts { optErrorFormat = JsonErrors } rest
+    _ -> Left ("unknown --error-format '" ++ name ++ "'; known: human, json")
 parseOptions _ (flag : _) = Left ("unknown option: " ++ flag)
+
+-- | Print a diagnostic in the configured format: human-readable text, or a
+-- single JSON object (the machine-readable form phase 6 adds).
+emitDiagnostic :: Options -> String -> Diagnostic -> IO ()
+emitDiagnostic opts source d = case optErrorFormat opts of
+  HumanErrors -> hPutStr stderr (render (optInput opts) source d)
+  JsonErrors  -> hPutStrLn stderr (renderJson d)
 
 run :: Options -> IO ()
 run opts = do
   source <- readFileUtf8 (optInput opts)
   case prepare opts source of
     Left problem -> do
-      hPutStr stderr (render (optInput opts) source problem)
+      emitDiagnostic opts source problem
       exitFailure
     Right (elab, modulus) -> do
       verdict <- proveDeterminacy opts modulus elab
@@ -122,18 +140,18 @@ run opts = do
         -- The decidable core said no and escalation was switched off: exactly
         -- the phase-2 message, so `--no-smt` is a true rollback.
         VRejected failure -> do
-          hPutStr stderr (render (optInput opts) source (determinacyDiagnostic failure))
+          emitDiagnostic opts source (determinacyDiagnostic failure)
           exitFailure
 
         -- The solver produced the attack. This is worth far more than a
         -- rejection: it is the forgery, ready to reproduce.
         VRefuted cex -> do
-          hPutStr stderr (render (optInput opts) source (refutationDiagnostic modulus cex))
+          emitDiagnostic opts source (refutationDiagnostic modulus cex)
           exitFailure
 
         -- Honest incompleteness.
         VUnknown residual -> do
-          hPutStr stderr (render (optInput opts) source (residualDiagnostic residual))
+          emitDiagnostic opts source (residualDiagnostic residual)
           exitFailure
 
 -- | Everything up to (but not including) the determinacy proof, which is the
@@ -253,7 +271,7 @@ determinacyDiagnostic problem = case failNote failure of
     withHelp ("add a constraint that forces '" ++ target
               ++ "' in this case, then recompile")
     $ withNotes (assumptionNote ++ adviceNote ++ [conclusion])
-    $ diagAt line ("output '" ++ target ++ "' is not determined by the inputs" ++ context)
+    $ pinned ("output '" ++ target ++ "' is not determined by the inputs" ++ context)
   where
     failure = pfFailure problem
     body = pfBody problem
@@ -264,6 +282,12 @@ determinacyDiagnostic problem = case failNote failure of
     line = case [ iiLine i | i <- bodyAtoms body, iiWire i == failTarget failure, iiLine i > 0 ] of
       (l : _) -> l
       [] -> 1
+    -- The declaring atom's column, when the frontend recorded one, so the
+    -- caret lands on the offending output declaration (J.2).
+    col = case [ iiCol i | i <- bodyAtoms body, iiWire i == failTarget failure, iiCol i > 0 ] of
+      (c : _) -> Just c
+      [] -> Nothing
+    pinned = maybe (diagAt line) (diagAtCol line) col
 
     assumptionNote = case failAssumptions failure of
       [] -> ["the constraints admit more than one value of '" ++ target

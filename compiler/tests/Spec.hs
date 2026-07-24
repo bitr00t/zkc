@@ -18,6 +18,7 @@ import Zkc.Core.Ir
 import Zkc.Core.Passes (optimize, Stats(..))
 import Zkc.Diagnostics
 import Zkc.Emit.Json (emitJson)
+import Zkc.Json (Json(..), encode, parse)
 import Zkc.Field (fieldModulus)
 import Zkc.Syntax.Ast
 import Zkc.Syntax.Lexer (lexer, Tok(..), Token(..))
@@ -331,14 +332,14 @@ cases =
   , ( "parser: the circuit body instantiates the gadget"
     , case parseProgram isZero of
         Right p -> case circBody (progCircuit p) of
-          [SInstance (BindExisting ["out"]) "is_zero" [EVar "x" _] _] -> True
+          [SInstance (BindExisting ["out"]) "is_zero" [EVar "x" _] _ _] -> True
           _ -> False
         Left _ -> False )
 
   , ( "parser: 'let (r) = g(..)' is a fresh-result instance, not a scalar let"
     , case parseProgram divide of
         Right p -> case [ s | s@SInstance{} <- circBody (progCircuit p) ] of
-          (SInstance (BindFresh ["inv_b"]) "reciprocal" _ _ : _) -> True
+          (SInstance (BindFresh ["inv_b"]) "reciprocal" _ _ _ : _) -> True
           _ -> False
         Left _ -> False )
 
@@ -351,7 +352,7 @@ cases =
 
   , ( "parser: '*' binds tighter than '+'"
     , case parseCircuit "circuit C { output z: field; assert z == 1 + 2 * 3; }" of
-        Right (Circuit _ _ [SAssert _ (EAdd _ (EMul _ _ _) _) _]) -> True
+        Right (Circuit _ _ [SAssert _ (EAdd _ (EMul _ _ _) _) _ _]) -> True
         _ -> False )
 
   , ( "parser: missing semicolon names the expected token and line"
@@ -649,6 +650,91 @@ cases =
 
   , ( "json: assertion labels keep the source text for backend errors"
     , withJson isZero ("(x * out) == 0" `isInfixOf`) )
+
+  -- Diagnostics as JSON (phase 6, J.1) ----------------------------------
+  , ( "diag-json: the JSON value model round-trips through encode/parse"
+    , let v = JObj [ ("a", JArr [JInt 1, JBool True, JNull])
+                   , ("b", JStr "x\"y\\z\nw") ]
+      in parse (encode v) == Right v )
+
+  , ( "diag-json: a rich diagnostic round-trips (line, notes, help)"
+    , let d = withHelp "add a constraint"
+                (withNotes ["under x != 0", "two witnesses differ"]
+                   (diagAt 5 "output 'out' is not determined"))
+      in parseDiagnostic (renderJson d) == Right d )
+
+  , ( "diag-json: a real parse error round-trips through JSON"
+    , case parseProgram "circuit C { output z: field; assert z == 1 }" of
+        Left d -> parseDiagnostic (renderJson d) == Right d
+        Right _ -> False )
+
+  , ( "diag-json: a real elaborate error round-trips through JSON"
+    , case elab "circuit C { private x: field; private x: field; assert x == x; }" of
+        Left d -> parseDiagnostic (renderJson d) == Right d
+        Right _ -> False )
+
+  , ( "diag-json: a present line is a JSON number"
+    , "\"line\":7" `isInfixOf` renderJson (diagAt 7 "boom") )
+
+  , ( "diag-json: an absent line and help are null, not omitted"
+    , let j = renderJson (diag "boom")
+      in "\"line\":null" `isInfixOf` j && "\"help\":null" `isInfixOf` j )
+
+  , ( "diag-json: notes are an ordered JSON array"
+    , "\"notes\":[\"first\",\"second\"]"
+        `isInfixOf` renderJson (withNotes ["first", "second"] (diag "boom")) )
+
+  , ( "diag-json: quotes inside a message are escaped and survive the round-trip"
+    , let d = diag "expected identifier, found \"circuit\""
+      in "\\\"circuit\\\"" `isInfixOf` renderJson d
+         && parseDiagnostic (renderJson d) == Right d )
+
+  -- Columns and spans (phase 6, J.2) ------------------------------------
+  , ( "cols: the lexer records a 1-based column per token"
+    , case lexer "circuit Foo" of
+        Right ts -> map tokCol ts == [1, 9, 12]
+        Left _ -> False )
+
+  , ( "cols: a newline resets the column and advances the line"
+    , case lexer "a\n  b" of
+        Right ts -> map (\t -> (tokLine t, tokCol t)) ts == [(1, 1), (2, 3), (2, 4)]
+        Left _ -> False )
+
+  , ( "cols: a syntax error is pinned to the offending column"
+    , case parseCircuit "circuit C { output z: field; assert z == 1 }" of
+        Left d -> diagCol d == Just 44
+        Right _ -> False )
+
+  , ( "cols: an unexpected character carries line and column"
+    , case lexer "let\n  #" of
+        Left d -> diagLine d == Just 2 && diagCol d == Just 3
+        Right _ -> False )
+
+  , ( "cols: an output declaration carries its column into the AST"
+    , case parseCircuit "circuit C { output z: field; assert z == z; }" of
+        Right c -> map pdCol (circParams c) == [13]
+        Left _ -> False )
+
+  , ( "cols: an assertion carries its column into the AST"
+    , case parseCircuit "circuit C { output z: field; assert z == z; }" of
+        Right c -> [ col | SAssert _ _ _ col <- circBody c ] == [30]
+        Left _ -> False )
+
+  , ( "cols: the output column threads through to the IR atom"
+    , case compileIr "circuit C { output z: field; assert z == z; }" of
+        Right ir -> [ iiCol i | i <- irInputs ir, iiName i == "z" ] == [13]
+        Left _ -> False )
+
+  , ( "cols: a pinned diagnostic renders a caret and a line:col locus"
+    , let out = render "t.zkc"
+                  "circuit C { output z: field; assert z == 1 }"
+                  (diagAtCol 1 44 "boom")
+      in "t.zkc:1:44" `isInfixOf` out && "^" `isInfixOf` out )
+
+  , ( "diag-json: a column round-trips and is a JSON number"
+    , let d = diagAtCol 2 7 "boom"
+      in parseDiagnostic (renderJson d) == Right d
+         && "\"col\":7" `isInfixOf` renderJson d )
 
   -- SMT escalation: the query, built without ever running a solver -----
   , ( "smt: the failing scope is named, so escalation asks about it alone"

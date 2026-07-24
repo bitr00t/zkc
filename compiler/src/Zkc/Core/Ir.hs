@@ -47,6 +47,7 @@ data IrInput = IrInput
   , iiName :: String
   , iiVisibility :: Visibility
   , iiLine :: Int          -- ^ where it was declared, for diagnostics
+  , iiCol :: Int           -- ^ column of the declaration (0 = unknown) (J.2)
   } deriving (Eq, Show)
 
 data HintKind = KInvOrZero | KInv

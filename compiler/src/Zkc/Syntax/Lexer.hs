@@ -3,6 +3,10 @@
 -- No lexer generator and no external dependencies: the compiler builds with
 -- nothing but GHC's boot libraries, which keeps the toolchain story trivial
 -- (@make@ and go) and the whole pipeline auditable.
+--
+-- Every token records both the line and the 1-based column it starts on
+-- (phase 6, J.2). The column is what lets a diagnostic point a caret at the
+-- exact offending character rather than only naming the line.
 module Zkc.Syntax.Lexer
   ( Token(..)
   , Tok(..)
@@ -12,10 +16,10 @@ module Zkc.Syntax.Lexer
 
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 
-import Zkc.Diagnostics (Diagnostic, diagAt)
+import Zkc.Diagnostics (Diagnostic, diagAtCol)
 
--- | A token plus the line it was found on (for error messages).
-data Token = Token { tokKind :: Tok, tokLine :: Int }
+-- | A token plus the line and column it was found on (for error messages).
+data Token = Token { tokKind :: Tok, tokLine :: Int, tokCol :: Int }
   deriving (Eq, Show)
 
 data Tok
@@ -61,24 +65,25 @@ describeTok t = case t of
   TArrow    -> "'->'"
   TEof      -> "end of input"
 
--- | Tokenize, or fail with a line-annotated diagnostic.
+-- | Tokenize, or fail with a line- and column-annotated diagnostic. Columns
+-- are 1-based; a newline resets the column and advances the line.
 lexer :: String -> Either Diagnostic [Token]
-lexer = go 1
+lexer = go 1 1
   where
-    go :: Int -> String -> Either Diagnostic [Token]
-    go line [] = Right [Token TEof line]
-    go line s@(c:cs)
-      | c == '\n' = go (line + 1) cs
-      | isSpace c = go line cs
-      -- line comments
-      | c == '/', ('/':rest) <- cs = go line (dropWhile (/= '\n') rest)
+    go :: Int -> Int -> String -> Either Diagnostic [Token]
+    go line col [] = Right [Token TEof line col]
+    go line col s@(c:cs)
+      | c == '\n' = go (line + 1) 1 cs
+      | isSpace c = go line (col + 1) cs
+      -- line comments: skip to the end of the line; the newline reset follows.
+      | c == '/', ('/':rest) <- cs = go line col (dropWhile (/= '\n') rest)
       | isDigit c =
           let (digits, rest) = span isDigit s
-          in (Token (TNumber (read digits)) line :) <$> go line rest
+          in (Token (TNumber (read digits)) line col :) <$> go line (col + length digits) rest
       | isAlpha c || c == '_' =
           let (word, rest) = span (\x -> isAlphaNum x || x == '_') s
-          in (Token (keyword word) line :) <$> go line rest
-      | otherwise = symbol line s
+          in (Token (keyword word) line col :) <$> go line (col + length word) rest
+      | otherwise = symbol line col s
 
     keyword w = case w of
       "circuit" -> TCircuit
@@ -93,20 +98,21 @@ lexer = go 1
       "require" -> TRequire
       _         -> TIdent w
 
-    symbol line s = case s of
-      ('=':'=':rest) -> (Token TEqEq line :)   <$> go line rest
-      ('!':'=':rest) -> (Token TNe line :)     <$> go line rest
-      ('-':'>':rest) -> (Token TArrow line :)  <$> go line rest
-      ('{':rest)     -> (Token TLBrace line :) <$> go line rest
-      ('}':rest)     -> (Token TRBrace line :) <$> go line rest
-      ('(':rest)     -> (Token TLParen line :) <$> go line rest
-      (')':rest)     -> (Token TRParen line :) <$> go line rest
-      (':':rest)     -> (Token TColon line :)  <$> go line rest
-      (';':rest)     -> (Token TSemi line :)   <$> go line rest
-      (',':rest)     -> (Token TComma line :)  <$> go line rest
-      ('+':rest)     -> (Token TPlus line :)   <$> go line rest
-      ('-':rest)     -> (Token TMinus line :)  <$> go line rest
-      ('*':rest)     -> (Token TStar line :)   <$> go line rest
-      ('=':rest)     -> (Token TEq line :)     <$> go line rest
-      (c:_)          -> Left $ diagAt line ("unexpected character " ++ show c)
-      []             -> go line []
+    -- Each symbol emits at the current column and advances by its own width.
+    symbol line col s = case s of
+      ('=':'=':rest) -> (Token TEqEq line col :)   <$> go line (col + 2) rest
+      ('!':'=':rest) -> (Token TNe line col :)     <$> go line (col + 2) rest
+      ('-':'>':rest) -> (Token TArrow line col :)  <$> go line (col + 2) rest
+      ('{':rest)     -> (Token TLBrace line col :) <$> go line (col + 1) rest
+      ('}':rest)     -> (Token TRBrace line col :) <$> go line (col + 1) rest
+      ('(':rest)     -> (Token TLParen line col :) <$> go line (col + 1) rest
+      (')':rest)     -> (Token TRParen line col :) <$> go line (col + 1) rest
+      (':':rest)     -> (Token TColon line col :)  <$> go line (col + 1) rest
+      (';':rest)     -> (Token TSemi line col :)   <$> go line (col + 1) rest
+      (',':rest)     -> (Token TComma line col :)  <$> go line (col + 1) rest
+      ('+':rest)     -> (Token TPlus line col :)   <$> go line (col + 1) rest
+      ('-':rest)     -> (Token TMinus line col :)  <$> go line (col + 1) rest
+      ('*':rest)     -> (Token TStar line col :)   <$> go line (col + 1) rest
+      ('=':rest)     -> (Token TEq line col :)     <$> go line (col + 1) rest
+      (ch:_)         -> Left $ diagAtCol line col ("unexpected character " ++ show ch)
+      []             -> go line col []

@@ -38,9 +38,9 @@ parseProgram source = do
   tokens <- lexer source
   (items, rest) <- pItems tokens
   case rest of
-    (Token TEof _ : _) -> assemble items
-    (Token t l : _) ->
-      Left $ diagAt l ("unexpected " ++ describeTok t ++ " at the top level")
+    (Token TEof _ _ : _) -> assemble items
+    (Token t l col : _) ->
+      Left $ diagAtCol l col ("unexpected " ++ describeTok t ++ " at the top level")
     [] -> assemble items
 
 -- | Back-compat shim: a few call sites and tests still speak in terms of a
@@ -62,28 +62,28 @@ type P a = [Token] -> Either Diagnostic (a, [Token])
 
 pItems :: P [Item]
 pItems tokens = case tokens of
-  (Token TGadget _ : _) -> do
+  (Token TGadget _ _ : _) -> do
     (g, rest) <- pGadgetDef tokens
     (more, rest') <- pItems rest
     Right (IGadget g : more, rest')
-  (Token TCircuit _ : _) -> do
+  (Token TCircuit _ _ : _) -> do
     (c, rest) <- pCircuit tokens
     (more, rest') <- pItems rest
     Right (ICircuit c : more, rest')
   _ -> Right ([], tokens)
 
 expect :: Tok -> String -> P ()
-expect want context (Token got line : rest)
+expect want context (Token got line col : rest)
   | got == want = Right ((), rest)
-  | otherwise = Left $ diagAt line $
+  | otherwise = Left $ diagAtCol line col $
       "expected " ++ describeTok want ++ " " ++ context
       ++ ", found " ++ describeTok got
 expect want _ [] = Left $ diag ("unexpected end of input, expected " ++ describeTok want)
 
 pIdent :: String -> P (String, Int)
-pIdent _ (Token (TIdent name) line : rest) = Right ((name, line), rest)
-pIdent context (Token got line : _) =
-  Left $ diagAt line ("expected " ++ context ++ ", found " ++ describeTok got)
+pIdent _ (Token (TIdent name) line _ : rest) = Right ((name, line), rest)
+pIdent context (Token got line col : _) =
+  Left $ diagAtCol line col ("expected " ++ context ++ ", found " ++ describeTok got)
 pIdent context [] = Left $ diag ("unexpected end of input, expected " ++ context)
 
 -- Gadget definitions ---------------------------------------------------
@@ -108,7 +108,7 @@ pGadgetDef tokens0 = do
 -- | A comma-separated list of @Ident ':' 'field'@, possibly empty.
 pFieldNames :: P [String]
 pFieldNames tokens = case tokens of
-  (Token (TIdent _) _ : _) -> do
+  (Token (TIdent _) _ _ : _) -> do
     ((name, _), t1) <- pIdent "a name" tokens
     ((), t2) <- expect TColon "after the name" t1
     ((), t3) <- expect TField "as the type" t2
@@ -116,7 +116,7 @@ pFieldNames tokens = case tokens of
     Right (name : more, t4)
   _ -> Right ([], tokens)
   where
-    pFieldTail (Token TComma _ : rest) = do
+    pFieldTail (Token TComma _ _ : rest) = do
       ((name, _), t1) <- pIdent "a name" rest
       ((), t2) <- expect TColon "after the name" t1
       ((), t3) <- expect TField "as the type" t2
@@ -125,7 +125,7 @@ pFieldNames tokens = case tokens of
     pFieldTail ts = Right ([], ts)
 
 pRequires :: P [Require]
-pRequires (Token TRequire line : rest) = do
+pRequires (Token TRequire line _ : rest) = do
   ((name, _), t1) <- pIdent "a parameter name after 'require'" rest
   ((), t2) <- expect TNe "in the precondition (only '!= 0' is supported)" t1
   ((), t3) <- expectZero t2
@@ -136,9 +136,9 @@ pRequires tokens = Right ([], tokens)
 
 -- | Preconditions are @!= 0@ only, so the right-hand side must be @0@.
 expectZero :: P ()
-expectZero (Token (TNumber 0) _ : rest) = Right ((), rest)
-expectZero (Token got line : _) =
-  Left $ diagAt line $
+expectZero (Token (TNumber 0) _ _ : rest) = Right ((), rest)
+expectZero (Token got line col : _) =
+  Left $ diagAtCol line col $
     "a precondition must be '!= 0', found " ++ describeTok got
     ++ " on the right-hand side"
 expectZero [] = Left $ diag "unexpected end of input in a precondition"
@@ -158,32 +158,32 @@ pCircuit tokens0 = do
 -- | Parameter declarations must all precede the statements.
 pParams :: P [ParamDecl]
 pParams tokens = case tokens of
-  (Token TPrivate line : rest) -> one Private line rest
-  (Token TPublic line : rest) -> one Public line rest
-  (Token TOutput line : rest) -> one Output line rest
+  (Token TPrivate line col : rest) -> one Private line col rest
+  (Token TPublic line col : rest) -> one Public line col rest
+  (Token TOutput line col : rest) -> one Output line col rest
   _ -> Right ([], tokens)
   where
-    one visibility line rest = do
+    one visibility line col rest = do
       ((name, _), t1) <- pIdent "a parameter name" rest
       ((), t2) <- expect TColon "after the parameter name" t1
       ((), t3) <- expect TField "as the parameter type" t2
       ((), t4) <- expect TSemi "after the parameter declaration" t3
       (more, t5) <- pParams t4
-      Right (ParamDecl name visibility line : more, t5)
+      Right (ParamDecl name visibility line col : more, t5)
 
 -- Statements -----------------------------------------------------------
 
 pStmts :: P [Stmt]
 pStmts tokens = case tokens of
-  (Token TLet line : Token TLParen _ : rest) -> do
+  (Token TLet line col : Token TLParen _ _ : rest) -> do
     -- let (r, ..) = g(args);  — fresh-result instance
     (names, t1) <- pNames rest
     ((), t2) <- expect TEq "after the result names" t1
-    (stmt, t3) <- pInstanceCall (BindFresh names) line t2
+    (stmt, t3) <- pInstanceCall (BindFresh names) line col t2
     (more, t4) <- pStmts t3
     Right (stmt : more, t4)
 
-  (Token TLet line : rest) -> do
+  (Token TLet line _ : rest) -> do
     ((name, _), t1) <- pIdent "a binding name" rest
     ((), t2) <- expect TEq "after the binding name" t1
     (body, t3) <- pExpr t2
@@ -191,15 +191,15 @@ pStmts tokens = case tokens of
     (more, t5) <- pStmts t4
     Right (SLet name body line : more, t5)
 
-  (Token TLParen line : rest) -> do
+  (Token TLParen line col : rest) -> do
     -- (o, ..) = g(args);  — bind existing outputs
     (names, t1) <- pNames rest
     ((), t2) <- expect TEq "after the result names" t1
-    (stmt, t3) <- pInstanceCall (BindExisting names) line t2
+    (stmt, t3) <- pInstanceCall (BindExisting names) line col t2
     (more, t4) <- pStmts t3
     Right (stmt : more, t4)
 
-  (Token TAdvice line : rest) -> do
+  (Token TAdvice line _ : rest) -> do
     ((name, _), t1) <- pIdent "an advice name" rest
     ((), t2) <- expect TEq "after the advice name" t1
     (hint, t3) <- pHint t2
@@ -207,30 +207,30 @@ pStmts tokens = case tokens of
     (more, t5) <- pStmts t4
     Right (SAdvice name hint line : more, t5)
 
-  (Token TAssert line : rest) -> do
+  (Token TAssert line col : rest) -> do
     (lhs, t1) <- pExpr rest
     ((), t2) <- expect TEqEq "in the assertion" t1
     (rhs, t3) <- pExpr t2
     ((), t4) <- expect TSemi "after the assertion" t3
     (more, t5) <- pStmts t4
-    Right (SAssert lhs rhs line : more, t5)
+    Right (SAssert lhs rhs line col : more, t5)
 
-  (Token TRequire line : _) ->
-    Left $ diagAt line
+  (Token TRequire line col : _) ->
+    Left $ diagAtCol line col
       "'require' may only appear at the top of a gadget body, before any statement"
 
   _ -> Right ([], tokens)
 
 -- | Parse @Ident '(' args ')' ';'@ into an instance statement, given the
 -- already-parsed binding and the statement's line.
-pInstanceCall :: InstanceBind -> Int -> P Stmt
-pInstanceCall bind line tokens = do
+pInstanceCall :: InstanceBind -> Int -> Int -> P Stmt
+pInstanceCall bind line col tokens = do
   ((gadget, _), t1) <- pIdent "a gadget name to instantiate" tokens
   ((), t2) <- expect TLParen ("after gadget '" ++ gadget ++ "'") t1
   (args, t3) <- pArgs t2
   ((), t4) <- expect TRParen "to close the argument list" t3
   ((), t5) <- expect TSemi "after the instantiation" t4
-  Right (SInstance bind gadget args line, t5)
+  Right (SInstance bind gadget args line col, t5)
 
 -- | A parenthesised comma-separated list of names, already past the '('.
 pNames :: P [String]
@@ -238,40 +238,40 @@ pNames tokens = do
   ((first, _), t1) <- pIdent "a result name" tokens
   loop [first] t1
   where
-    loop acc (Token TComma _ : rest) = do
+    loop acc (Token TComma _ _ : rest) = do
       ((name, _), t1) <- pIdent "a result name" rest
       loop (acc ++ [name]) t1
-    loop acc (Token TRParen _ : rest) = Right (acc, rest)
-    loop _ (Token got line : _) =
-      Left $ diagAt line ("expected ',' or ')' in the result list, found " ++ describeTok got)
+    loop acc (Token TRParen _ _ : rest) = Right (acc, rest)
+    loop _ (Token got line col : _) =
+      Left $ diagAtCol line col ("expected ',' or ')' in the result list, found " ++ describeTok got)
     loop _ [] = Left $ diag "unexpected end of input in a result list"
 
 -- | Argument expressions, already past the '('. May be empty.
 pArgs :: P [Expr]
-pArgs tokens@(Token TRParen _ : _) = Right ([], tokens)
+pArgs tokens@(Token TRParen _ _ : _) = Right ([], tokens)
 pArgs tokens = do
   (first, t1) <- pExpr tokens
   loop [first] t1
   where
-    loop acc (Token TComma _ : rest) = do
+    loop acc (Token TComma _ _ : rest) = do
       (next, t1) <- pExpr rest
       loop (acc ++ [next]) t1
     loop acc ts = Right (acc, ts)
 
 pHint :: P Hint
-pHint (Token (TIdent name) line : rest) = do
+pHint (Token (TIdent name) line col : rest) = do
   build <- case name of
     "inv_or_zero" -> Right HintInvOrZero
     "inv" -> Right HintInv
-    _ -> Left $ diagAt line $
+    _ -> Left $ diagAtCol line col $
       "'" ++ name ++ "' is not a known hint; the right-hand side of 'advice' "
       ++ "must be a hint call (phase 2 provides 'inv_or_zero' and 'inv')"
   ((), t1) <- expect TLParen ("after hint '" ++ name ++ "'") rest
   (argument, t2) <- pExpr t1
   ((), t3) <- expect TRParen "to close the hint argument" t2
   Right (build argument, t3)
-pHint (Token got line : _) =
-  Left $ diagAt line $
+pHint (Token got line col : _) =
+  Left $ diagAtCol line col $
     "the right-hand side of 'advice' must be a hint call, found " ++ describeTok got
     ++ " (only hints may produce unconstrained values)"
 pHint [] = Left $ diag "unexpected end of input in advice binding"
@@ -281,10 +281,10 @@ pExpr tokens = do
   (first, rest) <- pTerm tokens
   loop first rest
   where
-    loop acc (Token TPlus line : rest) = do
+    loop acc (Token TPlus line _ : rest) = do
       (next, rest') <- pTerm rest
       loop (EAdd acc next line) rest'
-    loop acc (Token TMinus line : rest) = do
+    loop acc (Token TMinus line _ : rest) = do
       (next, rest') <- pTerm rest
       loop (ESub acc next line) rest'
     loop acc rest = Right (acc, rest)
@@ -294,22 +294,22 @@ pTerm tokens = do
   (first, rest) <- pFactor tokens
   loop first rest
   where
-    loop acc (Token TStar line : rest) = do
+    loop acc (Token TStar line _ : rest) = do
       (next, rest') <- pFactor rest
       loop (EMul acc next line) rest'
     loop acc rest = Right (acc, rest)
 
 pFactor :: P Expr
 pFactor tokens = case tokens of
-  (Token (TNumber n) line : rest) -> Right (ELit n line, rest)
-  (Token (TIdent name) line : rest) -> Right (EVar name line, rest)
-  (Token TMinus line : rest) -> do
+  (Token (TNumber n) line _ : rest) -> Right (ELit n line, rest)
+  (Token (TIdent name) line _ : rest) -> Right (EVar name line, rest)
+  (Token TMinus line _ : rest) -> do
     (inner, rest') <- pFactor rest
     Right (ENeg inner line, rest')
-  (Token TLParen _ : rest) -> do
+  (Token TLParen _ _ : rest) -> do
     (inner, t1) <- pExpr rest
     ((), t2) <- expect TRParen "to close the parenthesised expression" t1
     Right (inner, t2)
-  (Token got line : _) ->
-    Left $ diagAt line ("expected an expression, found " ++ describeTok got)
+  (Token got line col : _) ->
+    Left $ diagAtCol line col ("expected an expression, found " ++ describeTok got)
   [] -> Left $ diag "unexpected end of input in expression"
