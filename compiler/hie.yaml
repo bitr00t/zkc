@@ -1,0 +1,8 @@
+# HLS cradle for the bare-GHC build (no cabal/stack; see Makefile).
+# The compiler modules live under src/ and the test harness under tests/,
+# so HLS needs the same include paths the Makefile passes to ghc.
+cradle:
+  direct:
+    arguments:
+      - "-isrc"
+      - "-itests"
