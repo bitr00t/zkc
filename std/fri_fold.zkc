@@ -1,0 +1,20 @@
+// fri_fold(p, m, beta, x) -> (folded): one FRI folding step, as a verifier
+// check written in the language (phase 7, O.1).
+//
+// Given a query point x, the two openings of a FRI layer at x and -x
+//   p = f_i(x),   m = f_i(-x),
+// and the round challenge beta, the next layer at x^2 is
+//   f_{i+1}(x^2) = (p + m)/2 + beta * (p - m)/(2x).
+// Multiplying through by 2x avoids the halving and gives
+//   2x * folded == x*(p + m) + beta*(p - m),
+// which this gadget witnesses with inv2x = 1/(2x). The inverse doubles as a
+// proof that 2x != 0 (its assertion is infeasible at x = 0), so the verifier's
+// own advice is quarantined and `folded` is *determined* by the openings, the
+// challenge, and the point — the whole point of expressing a verifier this way.
+// Bind with:  (folded) = fri_fold(p, m, beta, x);
+gadget fri_fold(p: field, m: field, beta: field, x: field) -> (folded: field) {
+    advice inv2x = inv(x + x);
+    assert (x + x) * inv2x == 1;
+    let rhs = x * (p + m) + beta * (p - m);
+    assert folded == inv2x * rhs;
+}

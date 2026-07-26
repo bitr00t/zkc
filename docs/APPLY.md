@@ -1,47 +1,56 @@
-# zkc — Phase 7, N.3 (a mutation harness: proof the checker has teeth)
+# zkc — Phase 7, O.1 (a verifier check, expressed in the language)
 
-The third and final increment of Workstream N. N.1 gave the IR an executable
-meaning; N.2 proved the lowering rules faithful to it, exhaustively over a tiny
-field. N.3 proves the *check itself* is not vacuous: it deliberately breaks each
-lowering rule and confirms the N.1/N.2 verification catches the break.
+Phase 7's second half, O, makes a proof into something a circuit can check.
+O.1's first increment is the smallest honest piece the design names: one FRI
+folding step, written as an ordinary gadget and held to the same determinacy
+proof as any circuit — so "the proof verifies" is not a trusted black box but a
+determinate circuit.
 
-**Prerequisite:** builds on N.2 — this file *supersedes* the N.2 drop's
-`backend/zkc-core/tests/lowering_faithfulness_tests.rs` (it adds the N.3 section
-below the N.2 proofs). Apply `zkc_phase7_n1.zip` and `zkc_phase7_n2.zip` first.
+**Prerequisite:** builds on M (the `std/` library and `use` includes) and on N.1
+(the executable IR spec, used by the backend security test). Apply the earlier
+phase-6/7 drops first; this supersedes M's `compiler/tests/Spec.hs` and N.3's
+`backend/zkc-core/tests/core_tests.rs`.
 
-## The argument, made concrete
-N.2 established that the real lowering agrees with the spec on every assignment.
-It follows that *any* corruption of the lowering that changes its behaviour must
-disagree with the spec somewhere — so the check would catch it. N.3 turns that
-into a live, self-checking property rather than a paper argument.
+## The verifier checks
+- `std/fri_fold.zkc` — `fri_fold(p, m, beta, x) -> (folded)`. Given a FRI layer's
+  openings at x and -x, the challenge, and the point, it computes the next
+  layer at x^2: `2x*folded == x*(p+m) + beta*(p-m)`, witnessing `1/(2x)` with an
+  inverse that doubles as a proof that `2x != 0`. The verifier's advice is thus
+  quarantined and `folded` is *determined* by the openings — the whole point of
+  writing a verifier this way. (Verified numerically to compute the true
+  next-layer evaluation.)
+- `std/rlc.zkc` — `rlc(a, b, r) -> (out) = a + r*b`, the random-linear-combination
+  step a verifier uses to batch many claims under a challenge.
+- `examples/fri_verify.zkc` — a two-round FRI-query verifier: it folds across two
+  layers and checks they agree (`layer1 == f1_x2`). Every output is determined
+  by the proof openings, the challenges, and the query point.
 
-The harness generates labelled corruptions of each lowered rule — drop / neutralise
-a constraint, shift a constraint by a constant, perturb a coefficient, bump or
-flip a gate selector, and route a bogus copy constraint — and, over all of F_13,
-asserts the **anti-vacuity invariant**: every mutation that changes behaviour
-(differs from the honest lowering) is caught by the spec, and at least one such
-mutation exists per rule, so the check never passes on nothing. Named tests pin
-the design's examples directly: dropping the constraint admits a forgery the spec
-rejects; flipping the product selector diverges from the spec; a bogus copy
-rejects honest witnesses. A baseline test confirms the unmutated lowering is
-never flagged (no false positives).
-
-This is a lasting regression guard: weaken the spec or the check later and a
-previously-caught mutation would survive, breaking N.3.
+## How it's held honest
+- Frontend (`compiler/tests/Spec.hs`): `fri_fold` and `rlc` are added to the
+  gadget suite — each proves determinate, and its under-constrained negative
+  fixture is rejected. The two-round verifier is proved determinate end to end
+  (resolving its `use std::fri_fold;`), and `fri_fold`'s generated reference is
+  checked to show `folded` determined by a case split on x with `x != 0`
+  guaranteed — the determinacy discipline, visible in the docs.
+- Backend (`backend/zkc-core/tests/core_tests.rs`): held to the N.1 spec over
+  BN254, the `fri_fold` circuit accepts the honest next-layer value and rejects a
+  forged one, the spec naming the violated folding assertion. This is the
+  security seam O.2's recursion will lean on.
 
 ## Build / test
-    cd backend && cargo test -p zkc-core --test lowering_faithfulness_tests
-    # 12 tests (7 from N.2, 5 from N.3), all green
+    make -C compiler all
+    cd compiler && ghc -O0 -isrc -itests -outputdir build/test-objs \
+        -o build/spec tests/Spec.hs && ./build/spec        # 146/146 green
+    cd backend && cargo test -p zkc-core                    # 50 core tests, all green
+
+    ZKC_STD_PATH=std zkc build examples/fri_verify.zkc      # the verifier compiles
 
 ## Notes
-- **No production code changes.** Like N.2, N.3 adds only tests; it corrupts
-  *clones* of the lowered structures (all `Clone`, all public) and never touches
-  the shipping lowering.
-- One subtlety handled: dropping a Plonkish row is done by neutralising its gate
-  (zeroing the selectors), not removing it, so the copy and public-cell indices
-  that reference rows by position stay valid.
-- With N.3, **workstream N (formal verification of the lowering) is complete.**
-  Phase 7's remaining half is O — a verifier expressed in the language, and the
-  first recursion.
-- Local-only `backend/Cargo.lock` pins remain required (never commit): `zeroize
-  1.8.1`, `zeroize_derive 1.4.2`, `rayon 1.7.0`, `rayon-core 1.12.1`.
+- Additive: the language, determinacy, SMT, both lowerings, and the witness
+  solver are unchanged; only gadgets and tests are added.
+- The FRI fold is expressible in pure field arithmetic plus one inverse, so it
+  proves under the decidable core — no SMT needed.
+- Test progression: frontend 140 -> 146; backend 110 -> 111.
+- Next: O.2 — feed a proof and its verification key to a verifier circuit and
+  prove *that*, one proof attesting to another, with a tampered inner proof
+  failing the outer.

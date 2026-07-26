@@ -1,0 +1,9 @@
+// rlc(a, b, r) -> (out): a random linear combination, out = a + r*b.
+//
+// The batching step every verifier uses to fold many claims into one under a
+// challenge r (a Horner step: repeated application combines a whole list). It
+// is a linear function of its inputs, so `out` is determined immediately, with
+// no advice and no case split. Bind with:  (out) = rlc(a, b, r);
+gadget rlc(a: field, b: field, r: field) -> (out: field) {
+    assert out == a + r * b;
+}

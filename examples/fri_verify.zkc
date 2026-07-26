@@ -1,0 +1,24 @@
+// A two-round FRI query verifier, written in the language (phase 7, O.1).
+//
+// It folds a query across two FRI layers and checks the layers agree: the value
+// computed for f_1(x^2) from layer 0 must equal the claimed opening `f1_x2`.
+// Every output is determined by the proof openings, the challenges, and the
+// query point — so "the proof verifies" is an ordinary determinate circuit.
+use std::fri_fold;
+
+circuit FriVerify2 {
+    private f0_x: field;      // f_0(x)
+    private f0_negx: field;   // f_0(-x)
+    private f1_x2: field;     // claimed f_1(x^2)
+    private f1_negx2: field;  // claimed f_1(-x^2)
+    private beta0: field;     // round-0 challenge
+    private beta1: field;     // round-1 challenge
+    private x: field;         // query point
+    output layer1: field;     // f_1(x^2), recomputed from layer 0
+    output layer2: field;     // f_2(x^4), recomputed from layer 1
+
+    (layer1) = fri_fold(f0_x, f0_negx, beta0, x);
+    assert layer1 == f1_x2;              // layers must agree
+    let x2 = x * x;
+    (layer2) = fri_fold(f1_x2, f1_negx2, beta1, x2);
+}

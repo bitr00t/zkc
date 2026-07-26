@@ -37,7 +37,7 @@ main = do
   hSetEncoding stdout utf8
   setLocaleEncoding utf8
   stdResults <- stdGadgetCases
-  m2Results <- sequence [includeCase, docCase]
+  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase]
   let allCases = cases ++ stdResults ++ m2Results
   results <- mapM runCase allCases
   let failures = length (filter not results)
@@ -58,6 +58,8 @@ gadgetChecks =
   , ("assert_bit", "circuit T { private b: field; output o: field; (o) = assert_bit(b); }")
   , ("mux",        "circuit T { private s: field; private a: field; private b: field; output o: field; (o) = mux(s, a, b); }")
   , ("assert_range4","circuit T { private x: field; output o: field; (o) = assert_range4(x); }")
+  , ("fri_fold",   "circuit T { private p: field; private m: field; private beta: field; private x: field; output o: field; (o) = fri_fold(p, m, beta, x); }")
+  , ("rlc",        "circuit T { private a: field; private b: field; private r: field; output o: field; (o) = rlc(a, b, r); }")
   ]
 
 stdGadgetCases :: IO [(String, Bool)]
@@ -122,6 +124,44 @@ docCase = do
 
 eitherToMaybe :: Either a b -> Maybe b
 eitherToMaybe = either (const Nothing) Just
+
+-- | O.1: the two-round FRI-query verifier (examples/fri_verify.zkc) resolves its
+-- @use std::fri_fold;@ include and is proved determinate — "the proof verifies"
+-- is an ordinary determinate circuit.
+friVerifyCase :: IO (String, Bool)
+friVerifyCase = do
+  circuit <- readFileMaybe "../examples/fri_verify.zkc"
+  lib     <- readFileMaybe "../std/fri_fold.zkc"
+  let ok = case (circuit >>= eitherToMaybe . parseProgram,
+                 lib >>= eitherToMaybe . parseGadgets) of
+             (Just prog, Just gs)
+               | [UseDecl "std" "fri_fold" _] <- progUses prog ->
+                   let merged = prog { progGadgets = gs ++ progGadgets prog }
+                   in case elaborate "bn254" merged of
+                        Right e -> either (const False) (const True)
+                          (checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e))
+                        Left _ -> False
+             _ -> False
+  pure ("verifier: the 2-round FRI-query verifier is proved determinate", ok)
+
+-- | O.1: the verifier check is held to the determinacy discipline — its
+-- generated reference shows `folded` determined by a case split on x and the
+-- gadget guaranteeing x != 0 (its advice quarantined by the inverse).
+friReferenceCase :: IO (String, Bool)
+friReferenceCase = do
+  lib <- readFileMaybe "../std/fri_fold.zkc"
+  let wrapper = "circuit T { private p: field; private m: field; private beta: field; private x: field; output o: field; (o) = fri_fold(p, m, beta, x); }"
+      ok = case lib >>= eitherToMaybe . parseProgram . (++ ("\n" ++ wrapper)) of
+             Just prog -> case elaborate "bn254" prog of
+               Right e -> case gadgetSummaries bn254 (elabGadgetBodies e) of
+                 Right summaries ->
+                   let doc = renderReference summaries
+                   in "fri_fold(p, m, beta, x)" `isInfixOf` doc
+                      && "guarantees: x != 0" `isInfixOf` doc
+                 Left _ -> False
+               Left _ -> False
+             Nothing -> False
+  pure ("verifier: fri_fold's reference shows its advice quarantined and output determined", ok)
 
 runCase :: (String, Bool) -> IO Bool
 runCase (name, ok) = do

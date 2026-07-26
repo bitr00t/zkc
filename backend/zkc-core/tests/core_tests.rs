@@ -1185,3 +1185,53 @@ fn spec_has_teeth_it_pins_a_node_equation_r1cs_does_not_read() {
         "the spec should name the corrupted add node"
     );
 }
+
+// --- Phase 7, O.1: a verifier check, held to the executable spec ----------
+//
+// fri_fold — one FRI folding step — is an ordinary determinate circuit (proved
+// in the frontend). Held to the N.1 spec over the field, it accepts exactly the
+// honest next-layer value and rejects any forgery: the seam recursion leans on.
+const FRI_FOLD_IR: &str = r#"{"schema_version":2,"name":"FriFold","field":"bn254","const_one_wire":0,"inputs":[{"wire":1,"name":"p","visibility":"private","line":2},{"wire":2,"name":"m","visibility":"private","line":2},{"wire":3,"name":"beta","visibility":"private","line":2},{"wire":4,"name":"x","visibility":"private","line":2},{"wire":5,"name":"o","visibility":"output","line":2}],"nodes":[{"wire":6,"advice_derived":false,"line":16,"op":"add","args":[4,4]},{"wire":7,"advice_derived":true,"op":"hint","hint":"inv","name":"inv2x","gadget":"fri_fold","line":16,"args":[6]},{"wire":8,"advice_derived":true,"line":17,"op":"mul","args":[6,7]},{"wire":9,"advice_derived":false,"line":17,"op":"const","value":"1"},{"wire":10,"advice_derived":false,"line":18,"op":"add","args":[1,2]},{"wire":11,"advice_derived":false,"line":18,"op":"mul","args":[4,10]},{"wire":12,"advice_derived":false,"line":18,"op":"sub","args":[1,2]},{"wire":13,"advice_derived":false,"line":18,"op":"mul","args":[3,12]},{"wire":14,"advice_derived":false,"line":18,"op":"add","args":[11,13]},{"wire":15,"advice_derived":true,"line":19,"op":"mul","args":[7,14]}],"assertions":[{"lhs":8,"rhs":9,"label":"((x + x) * inv2x) == 1","line":17},{"lhs":5,"rhs":15,"label":"folded == (inv2x * rhs)","line":19}],"determinacy":{"proved":true,"targets":["o"],"branches":[["x == 0"],["x != 0"]]}}"#;
+
+#[test]
+fn fri_fold_verifier_accepts_the_honest_fold_and_rejects_a_forgery() {
+    let ir = Ir::from_json(FRI_FOLD_IR).unwrap();
+
+    // A concrete query: openings p = f(x), m = f(-x); challenge beta; point x.
+    let p = Fr::from_decimal("5").unwrap();
+    let m = Fr::from_decimal("8").unwrap();
+    let beta = Fr::from_decimal("11").unwrap();
+    let x = Fr::from_decimal("2").unwrap();
+    // The honest fold: (x(p + m) + beta(p - m)) / (2x).
+    let folded = x
+        .add(x)
+        .inverse()
+        .unwrap()
+        .mul(x.mul(p.add(m)).add(beta.mul(p.sub(m))));
+
+    let honest = run(
+        &ir,
+        &[("p", "5"), ("m", "8"), ("beta", "11"), ("x", "2"), ("o", &folded.to_decimal())],
+        &[],
+    )
+    .0;
+    assert!(
+        ir.is_satisfied::<Fr>(&honest),
+        "the honest fold must satisfy the verifier circuit"
+    );
+
+    // Forge the next-layer value: the spec rejects it, naming the folding check.
+    let forged_o = folded.add(Fr::one());
+    let forged = run(
+        &ir,
+        &[("p", "5"), ("m", "8"), ("beta", "11"), ("x", "2"), ("o", &forged_o.to_decimal())],
+        &[],
+    )
+    .0;
+    assert!(!ir.is_satisfied::<Fr>(&forged), "a forged fold must be rejected");
+    assert!(
+        ir.unmet::<Fr>(&forged).iter().any(|u| matches!(u,
+            Unmet::Assertion { label, .. } if label.contains("folded == (inv2x * rhs)"))),
+        "the spec should name the violated folding assertion"
+    );
+}

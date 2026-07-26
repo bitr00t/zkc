@@ -1,0 +1,4 @@
+// BROKEN: out is never constrained. Determinacy rejects it.
+gadget rlc(a: field, b: field, r: field) -> (out: field) {
+    assert a == a;
+}

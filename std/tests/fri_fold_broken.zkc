@@ -1,0 +1,6 @@
+// BROKEN: the folding assertion is gone, so `folded` is unconstrained — the
+// verifier would accept any next-layer value. Determinacy rejects it.
+gadget fri_fold(p: field, m: field, beta: field, x: field) -> (folded: field) {
+    advice inv2x = inv(x + x);
+    assert (x + x) * inv2x == 1;
+}
