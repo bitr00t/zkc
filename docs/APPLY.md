@@ -1,42 +1,48 @@
-# zkc — Phase 6, J.1 (JSON diagnostics) + J.2 (columns & spans)
+# zkc — Phase 6, K (language server + hover)
 
-Overlay these onto the repo root (`bitr00t/zkc`), preserving paths. Frontend
-only; the backend is untouched.
+An LSP server that reuses the compiler as a library to publish determinacy
+diagnostics, plus a hover that surfaces the `--explain` proof.
 
-## New file
-- `compiler/src/Zkc/Json.hs` — a tiny dependency-free JSON model (value type,
-  encoder, parser). The structured-output foundation the rest of phase 6
-  (LSP, profiler) builds on. Boot libraries only.
+**Prerequisite:** this builds on J.1 (JSON diagnostics, `Zkc.Json`) and J.2
+(columns, `diagCol`) from the previous drop (`zkc_phase6_j1_j2.zip`). Apply that
+first; the files below overlay cleanly on top of it (they supersede that drop's
+`Main.hs` and `tests/Spec.hs`).
+
+## New files
+- `compiler/src/Zkc/Diagnose.hs` — the front end as a library. `diagnoseSource`
+  runs parse -> elaborate -> the *decidable* determinacy core (no solver, no
+  IO) and returns `[Diagnostic]`; the CLI and the server now share the same
+  diagnostic construction (the `determinacyDiagnostic` / `refutation` /
+  `residual` builders moved here out of `Main`). Also `hoverAt`, which reports
+  the determinacy proof for the output under the cursor.
+- `compiler/src/Zkc/Lsp.hs` — the LSP server. Speaks JSON-RPC over stdin/stdout
+  with `Content-Length` framing (UTF-8-byte-accurate, hand-rolled on the boot
+  `bytestring`). `handleMessage` is a pure `(state, request) -> (state,
+  replies)` function so the whole protocol is unit-tested without a subprocess;
+  `runLsp` is only the IO loop. Handles `initialize` (advertising full sync +
+  hover), `didOpen` / `didChange` / `didClose` (publishing diagnostics), and
+  `textDocument/hover` (the proof), plus `shutdown` / `exit`.
 
 ## Modified
-- `compiler/src/Zkc/Diagnostics.hs`
-    * J.1: `renderJson` / `parseDiagnostic` / `diagnosticToJson` /
-      `diagnosticFromJson` — a diagnostic serialises to JSON and round-trips.
-    * J.2: new `diagCol` field + `diagAtCol`; `render` now draws a caret under
-      the offending column and shows a `line:col` locus.
-- `compiler/src/Main.hs`
-    * `--error-format human|json` (default human); all four error sites route
-      through one `emitDiagnostic` helper.
-    * The determinacy diagnostic now points a column (from the output atom).
-- `compiler/src/Zkc/Syntax/Lexer.hs` — every token carries a 1-based `tokCol`;
-  columns reset on newline.
-- `compiler/src/Zkc/Syntax/Parser.hs` — syntax errors are pinned to the
-  offending token's column; output/assert/instance nodes capture their column.
-- `compiler/src/Zkc/Syntax/Ast.hs` — `pdCol` on `ParamDecl`; a column on
-  `SAssert` and `SInstance` (the three sites where diagnostics land).
-- `compiler/src/Zkc/Core/Ir.hs` — `iiCol` on `IrInput` (0 = unknown).
-- `compiler/src/Zkc/Core/Elaborate.hs` — threads `pdCol` -> `iiCol` so the
-  determinacy diagnostic can point at the output declaration.
-- `compiler/tests/Spec.hs` — +17 checks (8 for J.1, 9 for J.2).
+- `compiler/src/Main.hs` — the five diagnostic builders moved to `Zkc.Diagnose`
+  (imported back); new `zkc lsp` subcommand wired to `runLsp`; usage updated.
+  CLI behaviour is otherwise unchanged.
+- `compiler/tests/Spec.hs` — +14 checks (LSP protocol core, diagnostic->LSP
+  range mapping, UTF-8 framing, and hover surfacing the proof).
 
-## Build / test
+## Run / test
     make -C compiler all
     cd compiler && ghc -O0 -isrc -itests -outputdir build/test-objs \
-        -o build/spec tests/Spec.hs && ./build/spec     # 107/107 green
+        -o build/spec tests/Spec.hs && ./build/spec        # 121/121 green
+
+    # start the server (an editor client speaks to it over stdin/stdout):
+    compiler/build/zkc lsp
 
 ## Notes
-- Additive: the IR JSON emitter (`Emit/Json.hs`) and its schema v2 are
-  untouched; `iiCol` is used only for diagnostics, not emitted into the IR.
-- `diagnosticFromJson` expects the `col` field (it is always emitted, as
-  `null` when absent), so J.1 and J.2 round-trip together.
-- Baseline was 90/90; J.1 -> 98, J.2 -> 107.
+- The server runs only the decidable core, so it never shells out to a solver
+  and is safe to call on every keystroke. Refutation/residual (which need SMT
+  and IO) keep their diagnostic builders in `Zkc.Diagnose` for the CLI path.
+- Hover on an output shows "proved determined" with the case splits the proof
+  used (e.g. `x == 0` / `x != 0`), or, for the output the proof got stuck on,
+  why it is not determined.
+- Baseline entering K was 107/107; K -> 121/121 (+14).
