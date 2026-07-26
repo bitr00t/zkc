@@ -1,0 +1,18 @@
+// fs_challenge(seed, root) -> (alpha): the FRI folding challenge, derived
+// in-circuit by Fiat-Shamir (phase 7, O).
+//
+// A sound verifier must not take the folding challenge on trust — the prover
+// could then pick it after committing. The transcript draws it as a hash of
+// everything committed so far: after the domain separator `seed` and the layer
+// commitment `root` have been absorbed, the challenge is H::hash([seed, root, 0]).
+// For the circuit-friendly hash (sbox(x) = x^7, position offsets 1,2,3 and a
+// zero squeeze counter) that is sbox(seed + root + 6), so alpha is bound to the
+// commitment and the prover cannot choose it. Bind with:
+//     (alpha) = fs_challenge(seed, root);
+gadget fs_challenge(seed: field, root: field) -> (alpha: field) {
+    let a = seed + root + 6;
+    let a2 = a * a;
+    let a4 = a2 * a2;
+    let a6 = a4 * a2;
+    assert alpha == a6 * a;
+}

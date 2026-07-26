@@ -1,59 +1,54 @@
-# zkc — Phase 7, O: the complete in-circuit FRI verifier
+# zkc — Phase 7, O: in-circuit Fiat-Shamir
 
-O.1 expressed the algebraic fold as a determinate circuit; O.2 proved one fold
-inside an outer proof. This closes O's larger arc: a *complete* FRI verifier for
-one query, including the part O.1/O.2 left out — the **authenticity** check that
-the openings really sit under the committed root.
+The self-contained verifier. The complete in-circuit FRI verifier trusted its
+fold challenge as an input; this derives it *in-circuit* from the layer
+commitment, exactly as the transcript does — so a prover cannot pick the
+challenge after committing, which is the whole point of Fiat-Shamir.
 
-**Prerequisite:** builds on O.1 (`fri_fold`), M (`mux`, `use` includes), and
-phase 5 (the FRI/STARK prover). Supersedes O.1's `compiler/tests/Spec.hs`.
+**Prerequisite:** builds on the in-circuit FRI verifier drop (`hash_leaf`,
+`compress`, `fri_verify_full`). Supersedes that drop's `compiler/tests/Spec.hs`
+and `backend/zkc-core/tests/fri_verifier_tests.rs`.
 
-## The missing primitive: hashing in the language
-A Merkle path is repeated hashing, so a verifier needs a hash it can run
-in-circuit. The backend's default sponge nests `x^7` and blows past the
-determinacy analysis' monomial budget, so this uses a **circuit-friendly** hash
-of the same family, expressed as two gadgets:
-- `std/hash_leaf.zkc` — `hash_leaf(v) = sbox(v + 1)`, `sbox(x) = x^7`.
-- `std/compress.zkc` — `compress(l, r) = sbox(l + 2) + sbox(r + 3)`; order-sensitive,
-  so left and right children hash differently.
+## The challenge, in the field
+The transcript draws a challenge as a hash of everything committed so far. With
+the circuit-friendly hash and the transcript state `[seed, root]` (domain
+separator, then the layer commitment), the round-0 folding challenge is
+`sbox(seed + root + 6)`, `sbox(x) = x^7`. That collapses to a single gadget:
+- `std/fs_challenge.zkc` — `fs_challenge(seed, root) -> (alpha)`, `alpha = sbox(seed + root + 6)`.
 
-Neither nests, so each proves determinate on its own; the Merkle walk composes
-them through gadget *summaries*, which is what keeps the whole verifier under the
-monomial budget. A matching `CircuitHash` drives the backend proof, so a path
-that verifies in the tree verifies in the circuit, bit for bit.
+The backend test derives `alpha` this way and checks it against the *real*
+transcript (`assert_eq!(alpha_derived, transcript.challenge())`) before proving,
+so the in-circuit derivation is bit-for-bit the transcript's.
 
-## The verifier: examples/fri_verify_full.zkc
-For one query of a small proof (domain 4, one fold round, depth-2 paths) the
-circuit (a) Merkle-verifies both openings f(x) and f(-x) against the root —
-hashing the leaf and walking the path, with the position bits choosing left/right
-via `mux`; (b) folds the two openings (the O.1 relation); and (c) checks the fold
-against the final codeword, which must be constant. All 16 intermediate results
-are determined; "this query verifies" is an ordinary determinate circuit.
+## The verifier: examples/fri_verify_fs.zkc
+The complete verifier, but `alpha` is no longer an input — it is
+`(alpha) = fs_challenge(seed, root)`, then fed to the fold. Everything else (the
+two Merkle-path checks, the fold, the final-codeword check) is unchanged. The
+circuit proves determinate: `alpha`, like every other wire, is determined — here
+by the commitment, not by the prover.
 
 ## Held honest end to end
-- Frontend (`compiler/tests/Spec.hs`): `hash_leaf` and `compress` prove
-  determinate and their under-constrained fixtures are rejected; the full
-  verifier is proved determinate with all four includes resolved.
-- Backend (`backend/zkc-core/tests/fri_verifier_tests.rs`): a real one-round FRI
-  proof is produced and verified under `CircuitHash`; its first query's openings,
-  authentication paths, challenge, and final codeword are fed to the verifier
-  circuit, which is then **proved and verified as an outer STARK proof** —
-  recursion over the whole query, paths included. Tampering a sibling makes the
-  verifier reject and a forced outer proof fail to verify.
+- Frontend (`compiler/tests/Spec.hs`): `fs_challenge` proves determinate and its
+  under-constrained fixture is rejected; the Fiat-Shamir verifier proves
+  determinate with all five includes resolved.
+- Backend (`fri_verifier_tests.rs`): the derived challenge matches the real
+  transcript; the verifier proves and verifies as an outer STARK proof; and a
+  challenge *not* equal to `fs_challenge(seed, root)` is rejected — a prover
+  cannot substitute a convenient one.
 
 ## Build / test
     make -C compiler all && cd compiler && ghc -O0 -isrc -itests \
-        -outputdir build/test-objs -o build/spec tests/Spec.hs && ./build/spec   # 151/151
-    cd backend && cargo test -p zkc-core --test fri_verifier_tests               # 2 green
+        -outputdir build/test-objs -o build/spec tests/Spec.hs && ./build/spec   # 154/154
+    cd backend && cargo test -p zkc-core --test fri_verifier_tests               # 4 green
 
 ## Notes
-- Additive: the language, determinacy, SMT, both lowerings, the witness solver,
-  and the phase-5 prover are unchanged; only gadgets and tests are added.
-- **Scope, honestly.** One query, one round, depth-2 paths — the smallest
-  instance that exercises every part (hash, path, fold, final). Fiat-Shamir
-  (deriving the challenge and index in-circuit over the same hash) is the one
-  remaining piece; the challenges are taken as inputs here. The structure scales
-  by unrolling; a production verifier would add in-circuit Fiat-Shamir and more
-  rounds/queries.
+- Additive: language, determinacy, SMT, both lowerings, the witness solver, and
+  the phase-5 prover/transcript are unchanged; only a gadget and tests are added.
+- **Scope, honestly.** The *fold challenge* is now derived in-circuit — the
+  security-critical Fiat-Shamir value for FRI. The *query index* is still an
+  input: the transcript derives it by folding the challenge's decimal digits,
+  which is not an algebraic function of the field element. Deriving the index
+  in-circuit needs a circuit-friendly (bit-mask) index extraction in the
+  transcript — a small, separate change to `challenge_index`.
 - Local-only `backend/Cargo.lock` pins remain required (never commit): `zeroize
   1.8.1`, `zeroize_derive 1.4.2`, `rayon 1.7.0`, `rayon-core 1.12.1`.

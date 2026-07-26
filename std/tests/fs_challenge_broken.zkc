@@ -1,0 +1,5 @@
+// BROKEN: alpha is never constrained — the prover could choose the challenge.
+gadget fs_challenge(seed: field, root: field) -> (alpha: field) {
+    let a = seed + root + 6;
+    let a2 = a * a;
+}
