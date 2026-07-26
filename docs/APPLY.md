@@ -1,47 +1,49 @@
-# zkc — Phase 7, begin (N.1: the executable IR specification)
+# zkc — Phase 7, N.2 (per-rule faithfulness of the lowering, proved not sampled)
 
-Phase 7 is the roadmap's last: **recursion and formal verification of the
-lowering.** This drop opens it — the full design note (`docs/phase7.md`) plus the
-first workstream increment, N.1.
+The second increment of Workstream N. Where N.1 gave the IR an executable
+meaning and checked both lowerings against it on witnesses, N.2 proves the
+lowering *rules*: for each IR operation, the constraints and rows the lowering
+emits accept an assignment exactly when the operation's defining relation holds
+— for every field element, not a sampled few.
 
-## The design (docs/phase7.md)
-Phase 7 has two halves. **N — formal verification of the lowering:** the
-IR→R1CS/Plonkish lowering has been differential-tested since phase 4 (the two
-arithmetizations agree with *each other*), but never against an independent
-statement of what the IR *means* — so two lowerings wrong in the same way would
-agree. **O — recursion:** make "this proof verifies" a circuit a proof can
-assert. Order N → O; within N, N.1 (a spec) → N.2 (per-rule proofs) → N.3 (a
-mutation harness proving the spec can fail).
+**Prerequisite:** builds on N.1 (`Ir::is_satisfied` / `Ir::unmet`). Apply
+`zkc_phase7_n1.zip` first.
 
-## N.1 — An executable IR specification (this drop)
-`Ir::is_satisfied` / `Ir::unmet` (in `backend/zkc-core/src/ir.rs`) fix the
-meaning of the IR against a complete wire assignment, naming no arithmetization:
-the constant-one wire is 1, every arithmetic node equals its operation on its
-arguments, every assertion holds, and a *hint* node is unconstrained (the
-prover's freedom the determinacy system disciplines). It returns the list of
-`Unmet` obligations, empty when the assignment is a model.
+## What it proves, and how
+The proof is by exhaustion over a tiny field, F_13. Each rule's defining
+relation and the polynomials the lowering emits for it have total degree at most
+two; a degree-`d` polynomial identity that holds on every point of a field with
+more than `d` elements is the zero polynomial, so agreement across all of F_13
+(13 > 2) is a *proof* the identity holds over any field, not a sample. This is
+the Schwartz–Zippel fact the subject rests on, turned on the compiler.
 
-This is the third party the differential test lacked. New tests
-(`backend/zkc-core/tests/core_tests.rs`, phase-7 section) pin all three together:
-- `spec_agrees_with_both_lowerings_on_honest_witnesses` — spec ⟺ R1CS ⟺ Plonkish.
-- `spec_independently_rejects_the_forgery` — the spec names the unmet
-  `(x * out) == 0` assertion on the phase-0 attack, with no lowering consulted.
-- `spec_matches_both_lowerings_under_random_perturbation` — 300 random atom
-  assignments per fixture, re-solved, all three agree.
-- `spec_has_teeth_it_pins_a_node_equation_r1cs_does_not_read` — corrupting an
-  intermediate sum slips past R1CS (which folds the linear chain) but the spec
-  catches it, proving the oracle is independent, not a restatement of R1CS.
+For each operation the test builds the smallest circuit isolating it — the op
+feeding one assertion against a prover-chosen output — instantiates the *real*
+lowering over F_13 (everything downstream is generic over `ZkField`), and
+enumerates every assignment of the free wires. At each point three things must
+hold: the IR spec, the R1CS lowering, and the Plonkish lowering all agree, and
+their shared verdict equals `out == op(args)` computed independently. Because the
+output ranges over the whole field, the forgery direction (`out ≠ op(args)`) is
+covered as thoroughly as the honest one — the rule is pinned from both sides,
+and in both fusion modes.
+
+Rules covered: `const`, `add`, `sub`, `mul`, `neg`, and the equality assertion.
+A `the_check_sees_both_acceptance_and_rejection` test guards against a vacuous
+pass by confirming both verdicts actually occur.
 
 ## Build / test
-    cd backend && cargo test -p zkc-core        # 49 core tests (was 45), all green
+    cd backend && cargo test -p zkc-core --test lowering_faithfulness_tests
+    # 7 tests, all green
 
 ## Notes
-- Additive and generic over `ZkField`; determinacy, SMT, witness solving, and
-  both lowerings are unchanged, and the phase-0 forgery is still rejected.
-- The two `unused import` warnings under `cargo test` are pre-existing in
-  `goldilocks_tests.rs` (phase 5), untouched here.
-- Local-only `backend/Cargo.lock` pins remain required to build (never commit):
-  `zeroize 1.8.1`, `zeroize_derive 1.4.2`, and for the arkworks path
-  `rayon 1.7.0` + `rayon-core 1.12.1` (rayon-core >=1.13 needs rustc >=1.80).
-- Next: N.2 (per-rule faithfulness via the SMT layer or exhaustion) and N.3
-  (the mutation harness), then O (a verifier in the language, and recursion).
+- **No production code changes.** N.2 is a verification workstream: it proves the
+  *existing* lowering faithful, adding only a proof (one new test file). The IR,
+  both lowerings, the witness solver, and the determinacy analysis are untouched.
+- The tiny field `Fp<P>` lives in the test and implements `ZkField`, so the real
+  `lower_with` / `lower_plonkish_with` run over it unchanged — the thing verified
+  is the shipping lowering, not a model of it.
+- Local-only `backend/Cargo.lock` pins remain required (never commit): `zeroize
+  1.8.1`, `zeroize_derive 1.4.2`, `rayon 1.7.0`, `rayon-core 1.12.1`.
+- Next: N.3 (a mutation harness that corrupts each rule and confirms this check
+  catches it — evidence the specification can fail), then O (a verifier in the
+  language, and recursion).
