@@ -26,7 +26,7 @@
 -- ordinary scalar binding. Instantiation is always a statement, never a
 -- sub-expression, so elaboration never has to inline inside an expression
 -- tree.
-module Zkc.Syntax.Parser (parseProgram, parseCircuit) where
+module Zkc.Syntax.Parser (parseProgram, parseCircuit, parseGadgets) where
 
 import Zkc.Diagnostics
 import Zkc.Syntax.Ast
@@ -36,27 +36,64 @@ import Zkc.Syntax.Lexer
 parseProgram :: String -> Either Diagnostic Program
 parseProgram source = do
   tokens <- lexer source
-  (items, rest) <- pItems tokens
+  (uses, afterUses) <- pUses tokens
+  (items, rest) <- pItems afterUses
   case rest of
-    (Token TEof _ _ : _) -> assemble items
+    (Token TEof _ _ : _) -> assemble uses items
     (Token t l col : _) ->
       Left $ diagAtCol l col ("unexpected " ++ describeTok t ++ " at the top level")
-    [] -> assemble items
+    [] -> assemble uses items
 
 -- | Back-compat shim: a few call sites and tests still speak in terms of a
 -- single circuit. A program's circuit is what they want.
 parseCircuit :: String -> Either Diagnostic Circuit
 parseCircuit source = progCircuit <$> parseProgram source
 
+-- | Parse a library file: gadget definitions only, no circuit. This is what a
+-- @use std::g;@ include resolves against — a @std/@ gadget is ordinary source,
+-- minus the one circuit a directly-compilable file needs. (Phase 6, M.2)
+parseGadgets :: String -> Either Diagnostic [GadgetDef]
+parseGadgets source = do
+  tokens <- lexer source
+  (items, rest) <- pItems tokens
+  case rest of
+    (Token TEof _ _ : _) -> Right ()
+    (Token t l col : _) ->
+      Left $ diagAtCol l col ("unexpected " ++ describeTok t ++ " at the top level")
+    [] -> Right ()
+  case [ () | ICircuit _ <- items ] of
+    [] -> Right [ g | IGadget g <- items ]
+    _  -> Left $ diag "a library file defines only gadgets; it must not contain a 'circuit'"
+
 -- | A parsed top-level item is either a gadget definition or the circuit.
 data Item = IGadget GadgetDef | ICircuit Circuit
 
-assemble :: [Item] -> Either Diagnostic Program
-assemble items =
+assemble :: [UseDecl] -> [Item] -> Either Diagnostic Program
+assemble uses items =
   case [ c | ICircuit c <- items ] of
-    [circuit] -> Right (Program [ g | IGadget g <- items ] circuit)
+    [circuit] -> Right (Program uses [ g | IGadget g <- items ] circuit)
     []        -> Left $ diag "a source file must contain exactly one 'circuit'; none found"
     _         -> Left $ diag "a source file must contain exactly one 'circuit'; found several"
+
+-- | Parse the @use@ prefix: zero or more @use module::item;@ declarations that
+-- precede the gadgets and circuit. (Phase 6, M.2)
+pUses :: P [UseDecl]
+pUses tokens = case tokens of
+  (Token TUse _ _ : _) -> do
+    (u, rest) <- pUse tokens
+    (more, rest') <- pUses rest
+    Right (u : more, rest')
+  _ -> Right ([], tokens)
+
+pUse :: P UseDecl
+pUse tokens = do
+  ((), t1) <- expect TUse "at the start of a use declaration" tokens
+  ((modName, line), t2) <- pIdent "a module name after 'use'" t1
+  ((), t3) <- expect TColon "'::' after the module name" t2
+  ((), t4) <- expect TColon "'::' after the module name" t3
+  ((item, _), t5) <- pIdent "a gadget name after '::'" t4
+  ((), t6) <- expect TSemi "';' to end the use declaration" t5
+  Right (UseDecl modName item line, t6)
 
 type P a = [Token] -> Either Diagnostic (a, [Token])
 

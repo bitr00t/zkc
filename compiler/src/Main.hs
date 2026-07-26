@@ -1,840 +1,376 @@
--- | Test suite for the compiler frontend.
+-- | @zkc@ — the circuit compiler CLI.
 --
--- A hand-rolled harness rather than HUnit\/tasty, for the same reason the
--- compiler has no dependencies: @make test@ must work with nothing but GHC.
+-- > zkc build examples/iszero.zkc -o build/iszero.ir.json
+--
+-- Pipeline: parse → elaborate → optimize → **prove determinacy** → emit IR.
+--
+-- The determinacy pass runs after optimization, which is safe because every
+-- pass preserves the solution set of the constraint system (constant folding
+-- and CSE rewrite how a value is computed, never which assignments satisfy;
+-- dead-code elimination only removes nodes no assertion depends on). Running
+-- it on the smaller graph keeps the polynomial expansion cheaper.
 module Main (main) where
 
-import Data.List (isInfixOf)
+import Control.Monad (forM_, when)
+import Data.List (intercalate)
 import qualified Data.Set as Set
+import System.Environment (getArgs, lookupEnv)
+import System.IO.Error (tryIOError)
 import System.Exit (exitFailure, exitSuccess)
-import System.IO (hSetEncoding, stdout, utf8)
+import System.IO
+  ( IOMode(ReadMode, WriteMode), hClose, hGetContents, hPutStr, hPutStrLn
+  , hSetEncoding, openFile, stderr, stdout, utf8 )
 
 import Zkc.Analysis.Determinacy
-import qualified Zkc.Analysis.Poly as P
 import Zkc.Analysis.Smt
-  ( Dialect(..), Query(..), SolverAnswer(..), buildQuery, parseAnswer )
+  ( Counterexample(..), DeterminacyResult(..), Residual(..), SmtConfig(..)
+  , defaultSmtConfig, dialectFromName, escalate )
 import Zkc.Core.Elaborate (elaborate, Elaborated(..))
 import Zkc.Core.Ir
-import Zkc.Core.Passes (optimize, Stats(..))
+import Zkc.Core.Passes (optimize, renderStats, Stats(..))
+import Zkc.Diagnose (determinacyDiagnostic, refutationDiagnostic, residualDiagnostic)
+import Zkc.Lsp (runLsp)
+import Zkc.Reference (renderReference)
 import Zkc.Diagnostics
 import Zkc.Emit.Json (emitJson)
-import Zkc.Json (Json(..), encode, parse)
-import Zkc.Field (fieldModulus)
-import Zkc.Syntax.Ast
-import Zkc.Syntax.Lexer (lexer, Tok(..), Token(..))
-import Zkc.Syntax.Parser (parseProgram, parseCircuit)
+import Zkc.Field (fieldModulus, knownFields)
+import Zkc.Syntax.Ast (Program(..), UseDecl(..), GadgetDef(..))
+import Zkc.Syntax.Parser (parseProgram, parseGadgets)
+
+-- | How diagnostics are printed: for a human to read, or as one JSON object
+-- per diagnostic for an editor or language server to consume.
+data ErrorFormat = HumanErrors | JsonErrors
+
+data Options = Options
+  { optInput :: FilePath
+  , optOutput :: Maybe FilePath
+  , optField :: String
+  , optOptimize :: Bool
+  , optQuiet :: Bool
+  , optExplain :: Bool
+  , optSmt :: SmtConfig
+  , optErrorFormat :: ErrorFormat
+  }
+
+defaultOptions :: FilePath -> Options
+defaultOptions input = Options
+  { optInput = input
+  , optOutput = Nothing
+  , optField = "bn254"
+  , optOptimize = True
+  , optQuiet = False
+  , optExplain = False
+  , optSmt = defaultSmtConfig
+  , optErrorFormat = HumanErrors
+  }
 
 main :: IO ()
 main = do
+  -- Source files are UTF-8 regardless of the user's locale.
   hSetEncoding stdout utf8
-  results <- mapM runCase cases
-  let failures = length (filter not results)
-  putStrLn $ "\n" ++ show (length cases - failures) ++ "/" ++ show (length cases)
-             ++ " checks passed"
-  if failures == 0 then exitSuccess else exitFailure
+  hSetEncoding stderr utf8
+  args <- getArgs
+  case args of
+    ("build" : input : rest) -> case parseOptions (defaultOptions input) rest of
+      Left message -> hPutStrLn stderr ("error: " ++ message) >> exitFailure
+      Right options -> run options
+    ("doc" : input : rest) -> case parseOptions (defaultOptions input) rest of
+      Left message -> hPutStrLn stderr ("error: " ++ message) >> exitFailure
+      Right options -> runDoc options
+    ("lsp" : _) -> runLsp
+    _ -> usage >> exitFailure
 
-runCase :: (String, Bool) -> IO Bool
-runCase (name, ok) = do
-  putStrLn $ (if ok then "  ok:   " else "  FAIL: ") ++ name
-  pure ok
+parseOptions :: Options -> [String] -> Either String Options
+parseOptions opts [] = Right opts
+parseOptions opts ("-o" : path : rest) = parseOptions opts { optOutput = Just path } rest
+parseOptions opts ("--field" : name : rest) = parseOptions opts { optField = name } rest
+parseOptions opts ("--no-opt" : rest) = parseOptions opts { optOptimize = False } rest
+parseOptions opts ("--quiet" : rest) = parseOptions opts { optQuiet = True } rest
+parseOptions opts ("--explain" : rest) = parseOptions opts { optExplain = True } rest
+parseOptions opts ("--no-smt" : rest) =
+  parseOptions opts { optSmt = (optSmt opts) { smtEnabled = False } } rest
+parseOptions opts ("--smt-solver" : command : rest) =
+  parseOptions opts { optSmt = (optSmt opts) { smtCommand = command } } rest
+parseOptions opts ("--smt-dialect" : name : rest) =
+  case dialectFromName name of
+    Just dialect -> parseOptions opts { optSmt = (optSmt opts) { smtDialect = dialect } } rest
+    Nothing -> Left ("unknown SMT dialect '" ++ name ++ "'; known: ff, int")
+parseOptions opts ("--smt-timeout" : seconds : rest) =
+  case reads seconds of
+    [(n, "")] -> parseOptions opts { optSmt = (optSmt opts) { smtTimeout = n } } rest
+    _ -> Left ("--smt-timeout expects a number of seconds, got '" ++ seconds ++ "'")
+parseOptions opts ("--dump-smt" : path : rest) =
+  parseOptions opts { optSmt = (optSmt opts) { smtDump = Just path } } rest
+parseOptions opts ("--error-format" : name : rest) =
+  case name of
+    "human" -> parseOptions opts { optErrorFormat = HumanErrors } rest
+    "json"  -> parseOptions opts { optErrorFormat = JsonErrors } rest
+    _ -> Left ("unknown --error-format '" ++ name ++ "'; known: human, json")
+parseOptions _ (flag : _) = Left ("unknown option: " ++ flag)
 
--- Helpers ---------------------------------------------------------------
+-- | Print a diagnostic in the configured format: human-readable text, or a
+-- single JSON object (the machine-readable form phase 6 adds).
+emitDiagnostic :: Options -> String -> Diagnostic -> IO ()
+emitDiagnostic opts source d = case optErrorFormat opts of
+  HumanErrors -> hPutStr stderr (render (optInput opts) source d)
+  JsonErrors  -> hPutStrLn stderr (renderJson d)
 
-bn254 :: Integer
-bn254 = maybe (error "bn254 must be a known field") id (fieldModulus "bn254")
+run :: Options -> IO ()
+run opts = do
+  source <- readFileUtf8 (optInput opts)
+  prepared <- prepareIO opts source
+  case prepared of
+    Left problem -> do
+      emitDiagnostic opts source problem
+      exitFailure
+    Right (elab, modulus) -> do
+      verdict <- proveDeterminacy opts modulus elab
+      let (ir, stats) =
+            if optOptimize opts then optimize (elabIr elab)
+                                else (elabIr elab, Stats 0 0 0)
+      case verdict of
+        VProved report viaSmt -> do
+          let json = emitJson report ir
+          case optOutput opts of
+            Nothing -> putStrLn json
+            Just path -> writeFileUtf8 path json
+          when (not (optQuiet opts)) $ do
+            hPutStrLn stderr $
+              "compiled '" ++ irName ir ++ "' over " ++ irField ir
+              ++ ": " ++ show (length (irInputs ir)) ++ " inputs, "
+              ++ show (length (irNodes ir)) ++ " nodes, "
+              ++ show (length (irAssertions ir)) ++ " assertions"
+            when (optOptimize opts) $
+              hPutStrLn stderr ("  optimizer: " ++ renderStats stats)
+            hPutStrLn stderr ("  determinacy: " ++ summariseReport ir report
+                              ++ (if viaSmt then " (via SMT escalation)" else ""))
+            when (optExplain opts) (explain ir report)
+          exitSuccess
 
-elab :: String -> Either Diagnostic Elaborated
-elab source = parseProgram source >>= elaborate "bn254"
+        -- The decidable core said no and escalation was switched off: exactly
+        -- the phase-2 message, so `--no-smt` is a true rollback.
+        VRejected failure -> do
+          emitDiagnostic opts source (determinacyDiagnostic failure)
+          exitFailure
 
--- | The flat, backend-facing IR.
-compileIr :: String -> Either Diagnostic Ir
-compileIr source = elabIr <$> elab source
+        -- The solver produced the attack. This is worth far more than a
+        -- rejection: it is the forgery, ready to reproduce.
+        VRefuted cex -> do
+          emitDiagnostic opts source (refutationDiagnostic modulus cex)
+          exitFailure
 
--- | Compile and optimize, as the CLI does by default.
-compileOpt :: String -> Either Diagnostic (Ir, Stats)
-compileOpt source = optimize <$> compileIr source
+        -- Honest incompleteness.
+        VUnknown residual -> do
+          emitDiagnostic opts source (residualDiagnostic residual)
+          exitFailure
 
--- | Determinacy the phase-2 way: monolithically, on the fully inlined IR.
--- Still valid, and what the optimiser-equivalence check leans on.
-determinacyOf :: String -> Either Diagnostic (Either Failure Report)
-determinacyOf source = do
-  (ir, _) <- compileOpt source
-  pure (checkDeterminacy bn254 ir)
+-- | @zkc doc@ — generate the gadget reference from determinacy summaries.
+-- Resolves includes and elaborates exactly as @build@ does, then, instead of
+-- proving the circuit and emitting IR, proves each gadget and renders its
+-- summary. (Phase 6, M.2)
+runDoc :: Options -> IO ()
+runDoc opts = do
+  source <- readFileUtf8 (optInput opts)
+  case parseProgram source of
+    Left problem -> emitDiagnostic opts source problem >> exitFailure
+    Right program0 -> do
+      resolved <- resolveUses opts program0
+      case resolved of
+        Left problem -> emitDiagnostic opts source problem >> exitFailure
+        Right program -> case elaborate (optField opts) program of
+          Left problem -> emitDiagnostic opts source problem >> exitFailure
+          Right elab -> case fieldModulus (optField opts) of
+            Nothing -> emitDiagnostic opts source
+              (diag ("unknown field '" ++ optField opts ++ "'")) >> exitFailure
+            Just modulus ->
+              case gadgetSummaries modulus (elabGadgetBodies elab) of
+                Left failure ->
+                  emitDiagnostic opts source (determinacyDiagnostic failure) >> exitFailure
+                Right summaries -> do
+                  let doc = renderReference summaries
+                  case optOutput opts of
+                    Nothing   -> putStr doc
+                    Just path -> writeFileUtf8 path doc
+                  exitSuccess
 
--- | Determinacy the phase-3 way: compositionally, proving each gadget once
--- and reusing the summary at every call site.
-checkProgramOf :: String -> Either Diagnostic (Either Failure Report)
-checkProgramOf source = do
-  e <- elab source
-  pure (either (Left . pfFailure) Right
-          (checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e)))
+-- | Parse, resolve @use@ includes (IO), then elaborate. The only IO at the
+-- front of the pipeline, because resolving an include reads a file.
+prepareIO :: Options -> String -> IO (Either Diagnostic (Elaborated, Integer))
+prepareIO opts source =
+  case parseProgram source of
+    Left problem -> pure (Left problem)
+    Right program0 -> do
+      resolved <- resolveUses opts program0
+      pure (resolved >>= elaborateStep opts)
 
--- | The failing scope, for tests about /where/ an obligation stayed open.
-scopeOfFailure :: String -> Maybe (String, Bool)
-scopeOfFailure source = case elab source of
-  Right e -> case checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e) of
-    Left problem -> Just (pfScope problem, pfIsGadget problem)
-    Right _ -> Nothing
-  Left _ -> Nothing
+-- | Elaboration and modulus lookup — everything up to (but not including) the
+-- determinacy proof, over an already-parsed, already-resolved program.
+elaborateStep :: Options -> Program -> Either Diagnostic (Elaborated, Integer)
+elaborateStep opts program = do
+  elab <- elaborate (optField opts) program
+  modulus <- case fieldModulus (optField opts) of
+    Just p -> Right p
+    Nothing -> Left $ withHelp ("known fields: " ++ unwords (map fst knownFields))
+      $ diag ("unknown field '" ++ optField opts ++ "'; the determinacy analysis \
+              \needs its modulus to decide whether a coefficient is nonzero")
+  Right (elab, modulus)
 
--- Helpers for the SMT layer ---------------------------------------------
-
-circuitBodyOf :: String -> Maybe Body
-circuitBodyOf source = either (const Nothing) (Just . elabCircuitBody) (elab source)
-
-gadgetBodyOf :: String -> String -> Maybe Body
-gadgetBodyOf source name = case elab source of
-  Right e -> lookup name [ (gdName d, b) | (d, b) <- elabGadgetBodies e ]
-  Left _ -> Nothing
-
-systemFor :: Body -> Maybe BodySystem
-systemFor body = either (const Nothing) Just (bodySystem bn254 body)
-
--- | The SMT-LIB2 text for a scope, in the given dialect.
-queryFor :: Dialect -> String -> Body -> Maybe String
-queryFor dialect scope body = (qText . buildQuery bn254 dialect scope) <$> systemFor body
-
--- | Count non-overlapping occurrences of a needle.
-occurrences :: String -> String -> Int
-occurrences needle haystack =
-  length [ () | suffix <- tails' haystack, needle `isPrefixOf'` suffix ]
+-- | Resolve @use module::item;@ includes: read each library file, parse its
+-- gadget definitions, and merge them into the program (dedup by name; the
+-- program's own gadgets win a clash). The @std@ module resolves to the
+-- directory named by $ZKC_STD_PATH, or ./std by default. (Phase 6, M.2)
+resolveUses :: Options -> Program -> IO (Either Diagnostic Program)
+resolveUses _opts program = do
+  stdDir <- maybe "std" id <$> lookupEnv "ZKC_STD_PATH"
+  go stdDir (progUses program) []
   where
-    tails' [] = [[]]
-    tails' s@(_ : rest) = s : tails' rest
-    isPrefixOf' p s = take (length p) s == p
-
--- | True when compilation fails with a diagnostic mentioning the needle
--- anywhere: message, notes or suggestion.
-failsWith :: String -> Either Diagnostic a -> Bool
-failsWith needle (Left d) =
-  any (needle `isInfixOf`) (diagMessage d : diagNotes d ++ maybe [] pure (diagHelp d))
-failsWith _ (Right _) = False
-
--- | The determinacy pass proved everything, using this many branches.
-provedWith :: Int -> Either Diagnostic (Either Failure Report) -> Bool
-provedWith branches (Right (Right report)) = length (repAssumptions report) == branches
-provedWith _ _ = False
-
-proved :: Either Diagnostic (Either Failure Report) -> Bool
-proved (Right (Right _)) = True
-proved _ = False
-
-rejected :: Either Diagnostic (Either Failure Report) -> Maybe Failure
-rejected (Right (Left failure)) = Just failure
-rejected _ = Nothing
-
-wireNamed :: String -> Ir -> WireId
-wireNamed name ir = head ([ iiWire i | i <- irInputs ir, iiName i == name ] ++ [-1])
-
-countOps :: (Op -> Bool) -> Ir -> Int
-countOps predicate ir = length [ () | n <- irNodes ir, predicate (nOp n) ]
-
-isMul :: Op -> Bool
-isMul (OMul _ _) = True
-isMul _ = False
-
-isZeroAssumption :: Assumption -> Bool
-isZeroAssumption (AssumeZero _) = True
-isZeroAssumption _ = False
-
-isNonZeroAssumption :: Assumption -> Bool
-isNonZeroAssumption (AssumeNonZero _) = True
-isNonZeroAssumption _ = False
-
-withJson :: String -> (String -> Bool) -> Bool
-withJson source predicate = case compileOpt source of
-  Right (ir, _) -> case checkDeterminacy bn254 ir of
-    Right report -> predicate (emitJson report ir)
-    Left _ -> False
-  Left _ -> False
-
--- Sources ---------------------------------------------------------------
-
-mulSquare :: String
-mulSquare = unlines
-  [ "circuit MulSquare {"
-  , "    private a: field;"
-  , "    private b: field;"
-  , "    output c: field;"
-  , "    let ab = a * b;"
-  , "    assert c == ab * ab;"
-  , "}"
-  ]
-
--- | IsZero, now a parameterised definition. @out@ is a bare atom the body
--- only constrains, so the circuit binds it to a declared output.
-isZero :: String
-isZero = unlines
-  [ "gadget is_zero(x: field) -> (out: field) {"
-  , "    advice inv = inv_or_zero(x);"
-  , "    assert x * inv == 1 - out;"
-  , "    assert x * out == 0;"
-  , "}"
-  , "circuit IsZero {"
-  , "    private x: field;"
-  , "    output out: field;"
-  , "    (out) = is_zero(x);"
-  , "}"
-  ]
-
-isZeroBroken :: String
-isZeroBroken = unlines
-  [ "gadget is_zero(x: field) -> (out: field) {"
-  , "    advice inv = inv_or_zero(x);"
-  , "    assert x * inv == 1 - out;"
-  , "}"
-  , "circuit IsZeroBroken {"
-  , "    private x: field;"
-  , "    output out: field;"
-  , "    (out) = is_zero(x);"
-  , "}"
-  ]
-
--- | Divide, exercising the other call form: @inv_b@ is a computed result
--- (produced by advice), bound freshly with @let@.
-divide :: String
-divide = unlines
-  [ "gadget reciprocal(b: field) -> (inv_b: field) {"
-  , "    advice inv_b = inv(b);"
-  , "    assert b * inv_b == 1;"
-  , "}"
-  , "circuit Divide {"
-  , "    private a: field;"
-  , "    private b: field;"
-  , "    output q: field;"
-  , "    let (inv_b) = reciprocal(b);"
-  , "    assert q == a * inv_b;"
-  , "}"
-  ]
-
--- | Four independent IsZero instances. Each needs its own x==0\/x!=0 split, so
--- proving all four at once exceeds the depth bound — but proving the gadget
--- once and reusing it does not. The compositional scaling story, in miniature.
-manyIsZero :: String
-manyIsZero = unlines
-  [ "gadget is_zero(x: field) -> (out: field) {"
-  , "    advice inv = inv_or_zero(x);"
-  , "    assert x * inv == 1 - out;"
-  , "    assert x * out == 0;"
-  , "}"
-  , "circuit Many {"
-  , "    private x1: field;"
-  , "    private x2: field;"
-  , "    private x3: field;"
-  , "    private x4: field;"
-  , "    output o1: field;"
-  , "    output o2: field;"
-  , "    output o3: field;"
-  , "    output o4: field;"
-  , "    (o1) = is_zero(x1);"
-  , "    (o2) = is_zero(x2);"
-  , "    (o3) = is_zero(x3);"
-  , "    (o4) = is_zero(x4);"
-  , "}"
-  ]
-
--- | @scale@ can only be proved with its precondition: y = v\/x is determined
--- only when x is known nonzero. @nz_source@ establishes exactly that fact, so
--- a caller that runs it first can discharge the requirement.
-requireOk :: String
-requireOk = unlines
-  [ "gadget nz_source(b: field) -> (r: field) {"
-  , "    advice r = inv(b);"
-  , "    assert b * r == 1;"
-  , "}"
-  , "gadget scale(x: field, v: field) -> (y: field) {"
-  , "    require x != 0;"
-  , "    assert x * y == v;"
-  , "}"
-  , "circuit UsesScale {"
-  , "    private b: field;"
-  , "    private v: field;"
-  , "    output y: field;"
-  , "    let (bi) = nz_source(b);"
-  , "    (y) = scale(b, v);"
-  , "}"
-  ]
-
--- | The same, but nothing establishes that b is nonzero, so @scale@'s
--- precondition cannot be discharged.
-requireBad :: String
-requireBad = unlines
-  [ "gadget scale(x: field, v: field) -> (y: field) {"
-  , "    require x != 0;"
-  , "    assert x * y == v;"
-  , "}"
-  , "circuit UsesScale {"
-  , "    private b: field;"
-  , "    private v: field;"
-  , "    output y: field;"
-  , "    (y) = scale(b, v);"
-  , "}"
-  ]
-
--- Cases -----------------------------------------------------------------
-
-cases :: [(String, Bool)]
-cases =
-  -- Lexer ---------------------------------------------------------------
-  [ ( "lexer: keywords and identifiers are distinguished"
-    , case lexer "circuit Foo let x" of
-        Right ts -> map tokKind ts == [TCircuit, TIdent "Foo", TLet, TIdent "x", TEof]
-        Left _ -> False )
-
-  , ( "lexer: 'gadget' and 'output' are keywords"
-    , case lexer "gadget output" of
-        Right ts -> map tokKind ts == [TGadget, TOutput, TEof]
-        Left _ -> False )
-
-  , ( "lexer: 'require' and '!=' are lexed for preconditions"
-    , case lexer "require b != 0" of
-        Right ts -> map tokKind ts == [TRequire, TIdent "b", TNe, TNumber 0, TEof]
-        Left _ -> False )
-
-  , ( "lexer: '==' is one token, not two '='"
-    , case lexer "a == b" of
-        Right ts -> TEqEq `elem` map tokKind ts
-        Left _ -> False )
-
-  , ( "lexer: '!=' is one token, distinct from '='"
-    , case lexer "a != b = c" of
-        Right ts -> TNe `elem` map tokKind ts && TEq `elem` map tokKind ts
-        Left _ -> False )
-
-  , ( "lexer: line comments are skipped and lines still counted"
-    , case lexer "// note\nlet" of
-        Right (t:_) -> tokKind t == TLet && tokLine t == 2
-        _ -> False )
-
-  , ( "lexer: unknown character reports its line"
-    , case lexer "let\n#" of
-        Left d -> diagLine d == Just 2
-        Right _ -> False )
-
-  -- Parser --------------------------------------------------------------
-  , ( "parser: accepts a full circuit"
-    , case parseCircuit mulSquare of
-        Right c -> circName c == "MulSquare" && length (circParams c) == 3
-        Left _ -> False )
-
-  , ( "parser: 'output' is a third visibility, distinct from 'public'"
-    , case parseCircuit mulSquare of
-        Right c -> map pdVisibility (circParams c) == [Private, Private, Output]
-        Left _ -> False )
-
-  , ( "parser: a gadget definition carries its params and results"
-    , case parseProgram isZero of
-        Right p -> case progGadgets p of
-          [g] -> gdName g == "is_zero" && gdParams g == ["x"] && gdResults g == ["out"]
-          _ -> False
-        Left _ -> False )
-
-  , ( "parser: the circuit body instantiates the gadget"
-    , case parseProgram isZero of
-        Right p -> case circBody (progCircuit p) of
-          [SInstance (BindExisting ["out"]) "is_zero" [EVar "x" _] _ _] -> True
-          _ -> False
-        Left _ -> False )
-
-  , ( "parser: 'let (r) = g(..)' is a fresh-result instance, not a scalar let"
-    , case parseProgram divide of
-        Right p -> case [ s | s@SInstance{} <- circBody (progCircuit p) ] of
-          (SInstance (BindFresh ["inv_b"]) "reciprocal" _ _ _ : _) -> True
-          _ -> False
-        Left _ -> False )
-
-  , ( "parser: 'require' is parsed at the head of a gadget body"
-    , case parseProgram requireBad of
-        Right p -> case [ g | g <- progGadgets p, gdName g == "scale" ] of
-          (g:_) -> map rqName (gdRequires g) == ["x"]
-          _ -> False
-        Left _ -> False )
-
-  , ( "parser: '*' binds tighter than '+'"
-    , case parseCircuit "circuit C { output z: field; assert z == 1 + 2 * 3; }" of
-        Right (Circuit _ _ [SAssert _ (EAdd _ (EMul _ _ _) _) _ _]) -> True
-        _ -> False )
-
-  , ( "parser: missing semicolon names the expected token and line"
-    , failsWith "expected ';'" (parseCircuit "circuit C { output z: field; assert z == 1 }") )
-
-  , ( "parser: advice may only be bound to a hint call"
-    , failsWith "must be a hint call"
-        (parseProgram "circuit C { private x: field; advice w = x * x; }") )
-
-  , ( "parser: an unknown hint is rejected by name"
-    , failsWith "'sqrt' is not a known hint"
-        (parseProgram "circuit C { private x: field; advice w = sqrt(x); }") )
-
-  , ( "parser: a file needs exactly one circuit"
-    , failsWith "exactly one 'circuit'"
-        (parseProgram "gadget g(x: field) -> (y: field) { assert y == x; }") )
-
-  -- Diagnostics ---------------------------------------------------------
-  , ( "diagnostics: errors carry a line, notes and a suggestion"
-    , case compileIr "circuit C { private x: field; output o: field; \
-                     \advice inv = inv_or_zero(x); assert o == x * inv; }" of
-        Left d -> diagLine d /= Nothing && not (null (diagNotes d)) && diagHelp d /= Nothing
-        Right _ -> False )
-
-  , ( "diagnostics: rendering echoes the offending source line"
-    , let source = "circuit C {\n  private x: field;\n  bad\n}"
-      in case parseCircuit source of
-           Left d -> "bad" `isInfixOf` render "t.zkc" source d
-           Right _ -> False )
-
-  -- Gadget quarantine and scoping ---------------------------------------
-  , ( "quarantine: advice outside a gadget is rejected"
-    , failsWith "may only appear inside a 'gadget'"
-        (compileIr "circuit C { private x: field; output o: field; \
-                   \advice inv = inv_or_zero(x); assert o == x * inv; }") )
-
-  , ( "quarantine: the same advice inside a gadget is accepted"
-    , case compileIr isZero of
-        Right ir -> length (adviceWires ir) == 1
-        Left _ -> False )
-
-  , ( "quarantine: hint nodes record which gadget they came from"
-    , case compileIr isZero of
-        Right ir -> map (hiGadget . snd) (adviceWires ir) == ["is_zero"]
-        Left _ -> False )
-
-  , ( "quarantine: gadgets are top-level and do not nest"
-    , failsWith "found 'gadget'"
-        (parseProgram "gadget a(x: field) -> (y: field) { gadget b(z: field) -> (w: field) { } }") )
-
-  , ( "scoping: a gadget's internal bindings do not leak into the circuit"
-    , failsWith "'tmp' is not defined"
-        (compileIr (unlines
-          [ "gadget g(x: field) -> (y: field) { let tmp = x + x; assert y == tmp; }"
-          , "circuit C { private x: field; output y: field;"
-          , "            (y) = g(x); assert x == tmp; }" ])) )
-
-  , ( "scoping: each instantiation gets fresh wires (no sharing)"
-    , case compileIr manyIsZero of
-        Right ir -> length (adviceWires ir) == 4
-        Left _ -> False )
-
-  -- Elaboration ---------------------------------------------------------
-  , ( "elaborate: undefined variable is reported with its line"
-    , failsWith "'y' is not defined"
-        (compileIr "circuit C { private x: field; assert x == y; }") )
-
-  , ( "elaborate: rebinding a name is rejected"
-    , failsWith "already bound"
-        (compileIr "circuit C { private x: field; let a = x; let a = x; assert a == x; }") )
-
-  , ( "elaborate: duplicate parameters are rejected"
-    , failsWith "duplicate parameter"
-        (compileIr "circuit C { private x: field; private x: field; assert x == x; }") )
-
-  , ( "elaborate: advice no assertion uses is rejected as dead weight"
-    , failsWith "is never used by any assertion"
-        (compileIr (unlines
-          [ "gadget g(x: field) -> (o: field) {"
-          , "    advice ghost = inv_or_zero(x); assert o == x * x; }"
-          , "circuit C { private x: field; output o: field; (o) = g(x); }" ])) )
-
-  , ( "elaborate: an unknown gadget is reported"
-    , failsWith "unknown gadget 'missing'"
-        (compileIr "circuit C { private x: field; output o: field; (o) = missing(x); }") )
-
-  , ( "elaborate: an arity mismatch is reported"
-    , failsWith "expects 1 argument"
-        (compileIr (unlines
-          [ "gadget g(x: field) -> (y: field) { assert y == x; }"
-          , "circuit C { private a: field; private b: field; output o: field;"
-          , "            (o) = g(a, b); }" ])) )
-
-  , ( "elaborate: wire 0 is reserved and inputs start at 1"
-    , case compileIr isZero of
-        Right ir -> map iiWire (irInputs ir) == [1, 2] && constOneWire == 0
-        Left _ -> False )
-
-  , ( "elaborate: nodes are emitted in topological order"
-    , case compileIr isZero of
-        Right ir -> and [ all (< nWire n) (opArgs (nOp n)) | n <- irNodes ir ]
-        Left _ -> False )
-
-  , ( "elaborate: advice taint propagates, and untainted wires stay clean"
-    , case compileIr isZero of
-        Right ir ->
-          let tainted = adviceDerived ir
-          in all (`Set.member` tainted) (map fst (adviceWires ir))
-             && not (wireNamed "x" ir `Set.member` tainted)
-        Left _ -> False )
-
-  -- Polynomials ---------------------------------------------------------
-  , ( "poly: arithmetic reduces modulo the field"
-    , P.asConstant (P.constant 17 20) == Just 3 )
-
-  , ( "poly: (x + 1) * (x - 1) expands to x^2 - 1"
-    , let x = P.var bn254 1
-          one = P.constant bn254 1
-      in P.mul bn254 (P.add bn254 x one) (P.sub bn254 x one)
-         == P.sub bn254 (P.mul bn254 x x) one )
-
-  , ( "poly: substituting zero drops every monomial mentioning the atom"
-    , let expr = P.add bn254 (P.mul bn254 (P.var bn254 1) (P.var bn254 2))
-                             (P.constant bn254 5)
-      in P.asConstant (P.substituteZero 1 expr) == Just 5 )
-
-  , ( "poly: splitLinear separates the coefficient from the remainder"
-    , let x = P.var bn254 1
-          expr = P.sub bn254 (P.mul bn254 x (P.var bn254 2)) (P.constant bn254 3)
-      in case P.splitLinear bn254 2 expr of
-           Just (coefficient, remainder) ->
-             coefficient == x && P.asConstant remainder == Just (bn254 - 3)
-           Nothing -> False )
-
-  , ( "poly: splitLinear refuses degree 2, where a nonzero coefficient does \
-      \not imply a unique root"
-    , P.splitLinear bn254 2 (P.mul bn254 (P.var bn254 2) (P.var bn254 2)) == Nothing )
-
-  , ( "poly: a monomial of nonzero atoms is nonzero (fields have no zero divisors)"
-    , let expr = P.mul bn254 (P.var bn254 1) (P.var bn254 2)
-      in P.isSingleMonomialIn (Set.fromList [1, 2]) expr
-         && not (P.isSingleMonomialIn (Set.fromList [1]) expr) )
-
-  -- Determinacy: monolithic proofs on the inlined IR --------------------
-  , ( "determinacy: a purely computed output needs no case split"
-    , provedWith 1 (determinacyOf mulSquare) )
-
-  , ( "determinacy: IsZero is proved, and needs exactly the x==0 / x!=0 split"
-    , case determinacyOf isZero of
-        Right (Right report) ->
-          length (repAssumptions report) == 2
-          && any (any isZeroAssumption) (repAssumptions report)
-          && any (any isNonZeroAssumption) (repAssumptions report)
-        _ -> False )
-
-  , ( "determinacy: Divide is proved, chaining through a pinned advice wire"
-    , provedWith 2 (determinacyOf divide) )
-
-  , ( "determinacy: an output fixed by a constant is determined"
-    , provedWith 1 (determinacyOf "circuit C { output z: field; assert z == 7; }") )
-
-  , ( "determinacy: outputs may depend on public inputs, not only private ones"
-    , provedWith 1 (determinacyOf "circuit C { public h: field; output o: field; \
-                                  \assert o == h + 1; }") )
-
-  , ( "determinacy: a circuit with no outputs has nothing to prove"
-    , case determinacyOf "circuit C { public a: field; public b: field; \
-                         \assert a * b == 12; }" of
-        Right (Right report) -> null (repTargets report)
-        _ -> False )
-
-  -- Determinacy: compositional proofs -----------------------------------
-  , ( "compositional: IsZero proved by summary, x==0 / x!=0 surfaced from the gadget"
-    , case checkProgramOf isZero of
-        Right (Right report) ->
-          repTargets report == [2]
-          && length (repAssumptions report) == 2
-          && any (any isZeroAssumption) (repAssumptions report)
-          && any (any isNonZeroAssumption) (repAssumptions report)
-        _ -> False )
-
-  , ( "compositional: Divide proved by summary, with b's branches remapped to the caller"
-    , provedWith 2 (checkProgramOf divide) )
-
-  , ( "compositional: four IsZero instances are proved by reusing one summary"
-    , proved (checkProgramOf manyIsZero) )
-
-  , ( "compositional: the SAME four-instance circuit exceeds the depth bound monolithically"
-    , case determinacyOf manyIsZero of
-        Right (Left _) -> True   -- inlined-and-monolithic gives up: 4 splits > depth 3
-        _ -> False )
-
-  , ( "compositional: per-gadget branches concatenate (2N), they do not explode (2^N)"
-    , case checkProgramOf manyIsZero of
-        Right (Right report) -> length (repAssumptions report) == 8
-        _ -> False )
-
-  -- Preconditions -------------------------------------------------------
-  , ( "require: 'scale' is proved only because 'x != 0' is assumed in its body"
-    , proved (checkProgramOf requireOk) )
-
-  , ( "require: the precondition is discharged by a prior nonzero guarantee"
-    , case checkProgramOf requireOk of
-        Right (Right report) -> repTargets report == [3]  -- output y
-        _ -> False )
-
-  , ( "require: an undischarged precondition is a compile-time failure"
-    , case checkProgramOf requireBad of
-        Right (Left failure) -> "requires its argument to be nonzero" `isInfixOf`
-                                  maybe "" id (failNote failure)
-        _ -> False )
-
-  -- Determinacy: circuits that must be REJECTED --------------------------
-  , ( "determinacy: THE CRITERION — under-constrained IsZero is rejected"
-    , case (compileOpt isZeroBroken, rejected (determinacyOf isZeroBroken)) of
-        (Right (ir, _), Just failure) -> failTarget failure == wireNamed "out" ir
-        _ -> False )
-
-  , ( "determinacy: the rejection names the branch where the output stays free"
-    , case rejected (determinacyOf isZeroBroken) of
-        Just failure -> any isNonZeroAssumption (failAssumptions failure)
-        Nothing -> False )
-
-  , ( "determinacy: the rejection names the advice the prover may still choose"
-    , case (compileOpt isZeroBroken, rejected (determinacyOf isZeroBroken)) of
-        (Right (ir, _), Just failure) ->
-          failFreeAdvice failure == map fst (adviceWires ir)
-        _ -> False )
-
-  , ( "determinacy: a squared output is rejected, since z^2 = 4 has two roots"
-    , rejected (determinacyOf "circuit C { output z: field; assert z * z == 4; }")
-      /= Nothing )
-
-  , ( "determinacy: keeping only the second IsZero assertion is not enough either"
-    , rejected (determinacyOf (unlines
-        [ "gadget g(x: field) -> (out: field) {"
-        , "    advice inv = inv_or_zero(x);"
-        , "    assert x * out == 0;"
-        , "    assert inv * x == inv * x;"
-        , "}"
-        , "circuit C { private x: field; output out: field; (out) = g(x); }" ])) /= Nothing )
-
-  -- Passes --------------------------------------------------------------
-  , ( "passes: constant subexpressions are folded"
-    , case compileOpt "circuit C { output z: field; assert z == 2 * 3 + 4; }" of
-        Right (_, stats) -> statsFolded stats > 0
-        Left _ -> False )
-
-  , ( "passes: repeated subexpressions are shared (CSE)"
-    , case compileOpt "circuit C { private a: field; private b: field; output z: field; \
-                      \assert z == (a * b) + (a * b); }" of
-        Right (ir, stats) -> statsShared stats > 0 && countOps isMul ir == 1
-        Left _ -> False )
-
-  , ( "passes: nodes no assertion depends on are dropped"
-    , case compileOpt "circuit C { private a: field; private b: field; output z: field; \
-                      \let dead = a * b; assert z == a; }" of
-        Right (_, stats) -> statsDropped stats > 0
-        Left _ -> False )
-
-  , ( "passes: optimization preserves determinacy (same solution set)"
-    , case (checkDeterminacy bn254 <$> compileIr isZero, determinacyOf isZero) of
-        (Right (Right before), Right (Right after)) ->
-          repTargets before == repTargets after
-        _ -> False )
-
-  , ( "passes: wires stay dense and ordered after renumbering"
-    , case compileOpt isZero of
-        Right (ir, _) ->
-          let base = 1 + length (irInputs ir)
-          in map nWire (irNodes ir) == take (length (irNodes ir)) [base ..]
-        Left _ -> False )
-
-  -- JSON ----------------------------------------------------------------
-  , ( "json: announces schema version 2"
-    , withJson isZero ("\"schema_version\":2" `isInfixOf`) )
-
-  , ( "json: records the output visibility"
-    , withJson isZero ("\"visibility\":\"output\"" `isInfixOf`) )
-
-  , ( "json: hint nodes carry their gadget"
-    , withJson isZero ("\"gadget\":\"is_zero\"" `isInfixOf`) )
-
-  , ( "json: wires are tagged with the advice taint"
-    , withJson isZero ("\"advice_derived\":true" `isInfixOf`) )
-
-  , ( "json: the determinacy proof travels with the IR"
-    , withJson isZero (\j -> "\"determinacy\"" `isInfixOf` j
-                             && "\"proved\":true" `isInfixOf` j
-                             && "x != 0" `isInfixOf` j) )
-
-  , ( "json: constants are strings, since field elements exceed 64 bits"
-    , withJson "circuit C { output z: field; assert z == 7; }"
-        ("\"value\":\"7\"" `isInfixOf`) )
-
-  , ( "json: assertion labels keep the source text for backend errors"
-    , withJson isZero ("(x * out) == 0" `isInfixOf`) )
-
-  -- Diagnostics as JSON (phase 6, J.1) ----------------------------------
-  , ( "diag-json: the JSON value model round-trips through encode/parse"
-    , let v = JObj [ ("a", JArr [JInt 1, JBool True, JNull])
-                   , ("b", JStr "x\"y\\z\nw") ]
-      in parse (encode v) == Right v )
-
-  , ( "diag-json: a rich diagnostic round-trips (line, notes, help)"
-    , let d = withHelp "add a constraint"
-                (withNotes ["under x != 0", "two witnesses differ"]
-                   (diagAt 5 "output 'out' is not determined"))
-      in parseDiagnostic (renderJson d) == Right d )
-
-  , ( "diag-json: a real parse error round-trips through JSON"
-    , case parseProgram "circuit C { output z: field; assert z == 1 }" of
-        Left d -> parseDiagnostic (renderJson d) == Right d
-        Right _ -> False )
-
-  , ( "diag-json: a real elaborate error round-trips through JSON"
-    , case elab "circuit C { private x: field; private x: field; assert x == x; }" of
-        Left d -> parseDiagnostic (renderJson d) == Right d
-        Right _ -> False )
-
-  , ( "diag-json: a present line is a JSON number"
-    , "\"line\":7" `isInfixOf` renderJson (diagAt 7 "boom") )
-
-  , ( "diag-json: an absent line and help are null, not omitted"
-    , let j = renderJson (diag "boom")
-      in "\"line\":null" `isInfixOf` j && "\"help\":null" `isInfixOf` j )
-
-  , ( "diag-json: notes are an ordered JSON array"
-    , "\"notes\":[\"first\",\"second\"]"
-        `isInfixOf` renderJson (withNotes ["first", "second"] (diag "boom")) )
-
-  , ( "diag-json: quotes inside a message are escaped and survive the round-trip"
-    , let d = diag "expected identifier, found \"circuit\""
-      in "\\\"circuit\\\"" `isInfixOf` renderJson d
-         && parseDiagnostic (renderJson d) == Right d )
-
-  -- Columns and spans (phase 6, J.2) ------------------------------------
-  , ( "cols: the lexer records a 1-based column per token"
-    , case lexer "circuit Foo" of
-        Right ts -> map tokCol ts == [1, 9, 12]
-        Left _ -> False )
-
-  , ( "cols: a newline resets the column and advances the line"
-    , case lexer "a\n  b" of
-        Right ts -> map (\t -> (tokLine t, tokCol t)) ts == [(1, 1), (2, 3), (2, 4)]
-        Left _ -> False )
-
-  , ( "cols: a syntax error is pinned to the offending column"
-    , case parseCircuit "circuit C { output z: field; assert z == 1 }" of
-        Left d -> diagCol d == Just 44
-        Right _ -> False )
-
-  , ( "cols: an unexpected character carries line and column"
-    , case lexer "let\n  #" of
-        Left d -> diagLine d == Just 2 && diagCol d == Just 3
-        Right _ -> False )
-
-  , ( "cols: an output declaration carries its column into the AST"
-    , case parseCircuit "circuit C { output z: field; assert z == z; }" of
-        Right c -> map pdCol (circParams c) == [13]
-        Left _ -> False )
-
-  , ( "cols: an assertion carries its column into the AST"
-    , case parseCircuit "circuit C { output z: field; assert z == z; }" of
-        Right c -> [ col | SAssert _ _ _ col <- circBody c ] == [30]
-        Left _ -> False )
-
-  , ( "cols: the output column threads through to the IR atom"
-    , case compileIr "circuit C { output z: field; assert z == z; }" of
-        Right ir -> [ iiCol i | i <- irInputs ir, iiName i == "z" ] == [13]
-        Left _ -> False )
-
-  , ( "cols: a pinned diagnostic renders a caret and a line:col locus"
-    , let out = render "t.zkc"
-                  "circuit C { output z: field; assert z == 1 }"
-                  (diagAtCol 1 44 "boom")
-      in "t.zkc:1:44" `isInfixOf` out && "^" `isInfixOf` out )
-
-  , ( "diag-json: a column round-trips and is a JSON number"
-    , let d = diagAtCol 2 7 "boom"
-      in parseDiagnostic (renderJson d) == Right d
-         && "\"col\":7" `isInfixOf` renderJson d )
-
-  -- SMT escalation: the query, built without ever running a solver -----
-  , ( "smt: the failing scope is named, so escalation asks about it alone"
-    , scopeOfFailure isZeroBroken == Just ("is_zero", True) )
-
-  , ( "smt: the system carries one equation per assertion, over named atoms"
-    , case gadgetBodyOf isZero "is_zero" >>= systemFor of
-        Just system ->
-          length (bsEquations system) == 2
-          && map snd (bsAtoms system) == ["x", "out", "inv"]
-          && [ n | (_, n, _) <- bsTargets system ] == ["out"]
-          && bsInputs system == [1]
-        Nothing -> False )
-
-  , ( "smt: the query declares both witness copies of every atom"
-    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
-        -- three atoms (x, out, inv), twice over
-        Just text -> occurrences "(declare-fun " text == 6
-        Nothing -> False )
-
-  , ( "smt: the copies are forced to agree on the inputs"
-    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
-        Just text -> "(assert (= w1_1 w1_2))" `isInfixOf` text
-        Nothing -> False )
-
-  , ( "smt: the question asked is whether an output can still differ"
-    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
-        Just text -> "(assert (not (= (mod w2_1 P) (mod w2_2 P))))" `isInfixOf` text
-        Nothing -> False )
-
-  , ( "smt: the ff dialect speaks QF_FF and field operations natively"
-    , case gadgetBodyOf isZero "is_zero" >>= queryFor FiniteField "is_zero" of
-        Just text -> "(set-logic QF_FF)" `isInfixOf` text
-                     && "FiniteField" `isInfixOf` text
-                     && "ff.mul" `isInfixOf` text
-                     -- no modular encoding anywhere: the field is native here
-                     && not ("(mod " `isInfixOf` text)
-        Nothing -> False )
-
-  , ( "smt: the int dialect encodes the field as bounded integers with mod"
-    , case gadgetBodyOf isZero "is_zero" >>= queryFor IntegerMod "is_zero" of
-        Just text -> "(set-logic QF_NIA)" `isInfixOf` text
-                     && "(mod " `isInfixOf` text
-                     && "(>= w1_1 0)" `isInfixOf` text
-        Nothing -> False )
-
-  , ( "smt: a gadget's precondition is assumed in both copies, not refuted"
-    , case gadgetBodyOf requireOk "scale" >>= queryFor IntegerMod "scale" of
-        Just text -> occurrences "(assert (not (= (mod w1_" text == 2
-        Nothing -> False )
-
-  -- The soundness asymmetry: relaxations may prove, but must not refute --
-  , ( "smt: a scope that instantiates gadgets is flagged as a relaxation"
-    , case circuitBodyOf isZero >>= systemFor of
-        Just system -> not (bsSelfContained system)
-        Nothing -> False )
-
-  , ( "smt: a gadget body with no instances is self-contained"
-    , case gadgetBodyOf isZero "is_zero" >>= systemFor of
-        Just system -> bsSelfContained system
-        Nothing -> False )
-
-  -- Reading the solver back ---------------------------------------------
-  , ( "smt: unsat is read as proved"
-    , parseAnswer "unsat\n" == AnswerUnsat )
-
-  , ( "smt: sat is read together with its model"
-    , parseAnswer "sat\n((w1_1 2) (w2_1 1))" == AnswerSat [("w1_1", 2), ("w2_1", 1)] )
-
-  , ( "smt: a solver that gives up is not mistaken for an answer"
-    , case parseAnswer "unknown" of
-        AnswerUnknown _ -> True
-        _ -> False )
-
-  , ( "smt: a timeout is reported as a timeout, never as a refutation"
-    , case parseAnswer "timeout" of
-        AnswerUnknown reason -> "timed out" `isInfixOf` reason
-        _ -> False )
-
-  , ( "smt: an error from the solver is not silently read as a verdict"
-    , case parseAnswer "(error \"not configured with --cocoa\")" of
-        AnswerUnknown reason -> "unrecognised" `isInfixOf` reason
-        _ -> False )
-
-  , ( "smt: negative and field-literal model values are understood"
-    , parseAnswer "sat\n((a (- 5)) (b #f7m11) (c (as ff9 F)))"
-        == AnswerSat [("a", -5), ("b", 7), ("c", 9)] )
-
-  -- Golden IR: the rewrite is behaviour-preserving ----------------------
-  , ( "golden: rewritten IsZero inlines to the same shape (2 inputs, 6 nodes, 2 assertions)"
-    , case compileIr isZero of
-        Right ir -> length (irInputs ir) == 2
-                    && length (irNodes ir) == 6
-                    && length (irAssertions ir) == 2
-        Left _ -> False )
-
-  , ( "golden: rewritten Divide inlines to the same shape (3 inputs, 4 nodes, 2 assertions)"
-    , case compileIr divide of
-        Right ir -> length (irInputs ir) == 3
-                    && length (irNodes ir) == 4
-                    && length (irAssertions ir) == 2
-        Left _ -> False )
+    go _ [] acc =
+      pure (Right (program { progGadgets = dedupBy gdName (progGadgets program ++ acc) }))
+    go stdDir (u : us) acc = do
+      let dir  = if udModule u == "std" then stdDir else udModule u
+          path = dir ++ "/" ++ udItem u ++ ".zkc"
+      result <- tryIOError (readFileUtf8 path)
+      case result of
+        Left _ -> pure (Left (useUnreadable u path))
+        Right src -> case parseGadgets src of
+          Left d -> pure (Left d)
+          Right gs
+            | any ((== udItem u) . gdName) gs -> go stdDir us (acc ++ gs)
+            | otherwise -> pure (Left (useMissingGadget u path))
+
+    dedupBy key xs = reverse (foldl step [] xs)
+      where step acc x | any ((== key x) . key) acc = acc
+                       | otherwise = x : acc
+
+    useUnreadable u path = diagAt (udLine u) $
+      "cannot resolve 'use " ++ udModule u ++ "::" ++ udItem u
+      ++ "': could not read '" ++ path ++ "'"
+    useMissingGadget u path = diagAt (udLine u) $
+      "library '" ++ path ++ "' does not define a gadget named '" ++ udItem u ++ "'"
+
+-- | What the compiler concluded about determinacy.
+data Verdict
+  = VProved Report Bool         -- ^ proved; the flag records whether SMT was needed
+  | VRefuted Counterexample     -- ^ genuinely under-constrained, with the forgery
+  | VUnknown Residual           -- ^ the analysis could not decide, and says so
+  | VRejected ProgramFailure    -- ^ decidable core said no, escalation disabled
+
+-- | Prove determinacy, escalating to a solver when the decidable core stalls.
+--
+-- The decidable core stays the fast path — it answers the common gadget in
+-- milliseconds and is never skipped. Only when it stalls does a solver see the
+-- question, and then only for the one scope that stalled, which is what
+-- compositional proving (Workstream A) bought us: the query is one small
+-- gadget, never the inlined whole.
+--
+-- When the solver discharges a /gadget/, its result is fed back as an assumed
+-- summary and the compositional proof resumes — so one escalation can unblock
+-- every call site at once. The fuel bounds that loop: each gadget can be
+-- assumed at most once.
+proveDeterminacy :: Options -> Integer -> Elaborated -> IO Verdict
+proveDeterminacy opts modulus elab = go Set.empty (length (elabGadgetBodies elab) + 1)
+  where
+    config = optSmt opts
+    gadgets = elabGadgetBodies elab
+    circuit = elabCircuitBody elab
+
+    go assumed fuel =
+      case checkProgramWith modulus assumed gadgets circuit of
+        Right report -> pure (VProved report (not (Set.null assumed)))
+        Left failure
+          | not (smtEnabled config) -> pure (VRejected failure)
+          | fuel <= (0 :: Int) -> pure $ VUnknown Residual
+              { rsScope = pfScope failure
+              , rsReason = "escalation stopped making progress"
+              , rsQueryPath = Nothing
+              }
+          | otherwise -> do
+              result <- escalate config modulus failure
+              case result of
+                Refuted cex -> pure (VRefuted cex)
+                Unknown residual -> pure (VUnknown residual)
+                Proved report
+                  | pfIsGadget failure ->
+                      go (Set.insert (pfScope failure) assumed) (fuel - 1)
+                  | otherwise -> pure (VProved report True)
+
+-- Determinacy reporting ------------------------------------------------
+
+summariseReport :: Ir -> Report -> String
+summariseReport ir report = case repTargets report of
+  [] -> "no outputs declared, nothing to prove"
+  targets ->
+    show (length targets) ++ " output(s) proved determined ("
+    ++ unwords (map (nameOf ir) targets) ++ "), "
+    ++ show (length (repAssumptions report)) ++ " case(s)"
+
+explain :: Ir -> Report -> IO ()
+explain ir report = forM_ (repAssumptions report) $ \assumptions ->
+  hPutStrLn stderr $ "    case " ++ describeCase ir assumptions
+
+describeCase :: Ir -> [Assumption] -> String
+describeCase ir assumptions
+  | null assumptions = "(no assumptions needed)"
+  | otherwise = intercalate ", " [ renderAssumption ir a | a <- assumptions ]
+
+renderAssumption :: Ir -> Assumption -> String
+renderAssumption ir a = case a of
+  AssumeZero w -> nameOf ir w ++ " == 0"
+  AssumeNonZero w -> nameOf ir w ++ " != 0"
+
+nameOf :: Ir -> WireId -> String
+nameOf ir wire =
+  case [ iiName i | i <- irInputs ir, iiWire i == wire ] of
+    (name : _) -> name
+    [] -> case [ hiName info | (w, info) <- adviceWires ir, w == wire ] of
+      (name : _) -> name
+      [] -> "wire" ++ show wire
+
+-- | Naming inside a failing scope.
+--
+-- A gadget body numbers its wires locally, so resolving them against the
+-- circuit's IR would print the wrong names. The failure carries its own body
+-- precisely so this can be right.
+
+-- IO helpers -----------------------------------------------------------
+
+readFileUtf8 :: FilePath -> IO String
+readFileUtf8 path = do
+  handle <- openFile path ReadMode
+  hSetEncoding handle utf8
+  hGetContents handle   -- lazy read; the handle closes when fully consumed
+
+writeFileUtf8 :: FilePath -> String -> IO ()
+writeFileUtf8 path contents = do
+  handle <- openFile path WriteMode
+  hSetEncoding handle utf8
+  hPutStr handle contents
+  hClose handle
+
+usage :: IO ()
+usage = mapM_ (hPutStrLn stderr)
+  [ "zkc — zero-knowledge circuit compiler (phase 3)"
+  , ""
+  , "usage:"
+  , "  zkc build <file.zkc> [-o <out.json>] [--field <name>] [--no-opt]"
+  , "                       [--explain] [--quiet]"
+  , "                       [--no-smt] [--smt-solver <cmd>] [--smt-dialect ff|int]"
+  , "                       [--smt-timeout <seconds>] [--dump-smt <path>]"
+  , "  zkc lsp              run the language server (LSP over stdin/stdout)"
+  , ""
+  , "  --explain       print the case splits the determinacy proof used"
+  , ""
+  , "  When the decidable determinacy check stalls, the residual question is"
+  , "  escalated to an SMT solver, which can refute (printing the forgery) as"
+  , "  well as prove. The escalation only ever sees the one scope that stalled."
+  , ""
+  , "  --no-smt        skip escalation entirely (exact phase-2 behaviour)"
+  , "  --smt-solver    solver executable (default: cvc5)"
+  , "  --smt-dialect   ff  = QF_FF, field arithmetic natively (default)"
+  , "                  int = QF_NIA, integers with explicit mod, for solvers"
+  , "                        without finite-field support"
+  , "  --dump-smt      write the query to a file for inspection"
+  , ""
+  , "Emits the Core IR as JSON. Feed it to the Rust backend to lower, solve,"
+  , "prove and verify."
   ]

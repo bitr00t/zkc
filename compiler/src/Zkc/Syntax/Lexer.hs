@@ -24,7 +24,7 @@ data Token = Token { tokKind :: Tok, tokLine :: Int, tokCol :: Int }
 
 data Tok
   = TCircuit | TPrivate | TPublic | TOutput | TField | TGadget
-  | TLet | TAdvice | TAssert | TRequire
+  | TLet | TAdvice | TAssert | TRequire | TUse
   | TIdent String
   | TNumber Integer
   | TLBrace | TRBrace | TLParen | TRParen
@@ -42,6 +42,7 @@ describeTok t = case t of
   TPublic   -> "'public'"
   TOutput   -> "'output'"
   TGadget   -> "'gadget'"
+  TUse      -> "'use'"
   TField    -> "'field'"
   TLet      -> "'let'"
   TAdvice   -> "'advice'"
@@ -91,6 +92,7 @@ lexer = go 1 1
       "public"  -> TPublic
       "output"  -> TOutput
       "gadget"  -> TGadget
+      "use"     -> TUse
       "field"   -> TField
       "let"     -> TLet
       "advice"  -> TAdvice

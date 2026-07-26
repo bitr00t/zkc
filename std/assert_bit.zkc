@@ -1,0 +1,8 @@
+// assert_bit(b) -> (out): constrains b to {0, 1} and returns it.
+//
+// b*(1-b) == 0 holds exactly when b is a bit; out == b makes the result
+// determined. Bind with:  (out) = assert_bit(b);
+gadget assert_bit(b: field) -> (out: field) {
+    assert b * (1 - b) == 0;
+    assert out == b;
+}

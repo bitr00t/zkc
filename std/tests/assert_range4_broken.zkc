@@ -1,0 +1,5 @@
+// BROKEN: out is never constrained (the `out == x` assertion is gone).
+// Determinacy rejects it.
+gadget assert_range4(x: field) -> (out: field) {
+    assert x * (x - 1) * (x - 2) * (x - 3) == 0;
+}

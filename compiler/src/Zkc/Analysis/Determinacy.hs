@@ -45,6 +45,9 @@ module Zkc.Analysis.Determinacy
   ( checkDeterminacy
   , checkProgram
   , checkProgramWith
+  , gadgetSummaries
+  , summariseGadget
+  , Summary(..)
   , Assumption(..)
   , Report(..)
   , Failure(..)
@@ -192,6 +195,21 @@ checkProgramWith modulus assumed gadgetBodies circuitBody = do
           [ i | (i, w) <- zip [0 ..] (bodyParams body), w `elem` bodyRequires body ]
       , sumNonzero = []
       }
+
+-- | Prove every gadget (callees-first) and return each one's determinacy
+-- summary. These are the very summaries the compositional proof caches, so a
+-- generated reference built from them cannot drift from what was proved.
+-- (Phase 6, M.2)
+gadgetSummaries :: Integer -> [(GadgetDef, Body)]
+                -> Either ProgramFailure [(GadgetDef, Summary)]
+gadgetSummaries modulus gadgetBodies =
+  (reverse . snd) <$> foldl' proveNext (Right (Map.empty, [])) gadgetBodies
+  where
+    proveNext acc (def, body) = do
+      (done, out) <- acc
+      summary <- inScope (gdName def) body (summariseGadget modulus done def body)
+      Right (Map.insert (gdName def) summary done, (def, summary) : out)
+    inScope name body = either (Left . ProgramFailure name True body) Right
 
 -- | Prove one gadget definition and package the result as a 'Summary'.
 summariseGadget :: Integer -> Map.Map String Summary -> GadgetDef -> Body

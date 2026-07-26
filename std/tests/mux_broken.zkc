@@ -1,0 +1,5 @@
+// BROKEN: out is never constrained (the defining assertion is gone).
+// Determinacy rejects it.
+gadget mux(sel: field, a: field, b: field) -> (out: field) {
+    assert sel * (1 - sel) == 0;
+}

@@ -1,0 +1,6 @@
+// BROKEN: the second assertion is gone, so under x != 0 the prover may pick
+// any `out` (setting inv = (1 - out)/x). Determinacy rejects it.
+gadget is_zero(x: field) -> (out: field) {
+    advice inv = inv_or_zero(x);
+    assert x * inv == 1 - out;
+}

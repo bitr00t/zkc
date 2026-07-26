@@ -1,0 +1,5 @@
+// BROKEN: inv_x is computed by advice but never constrained, so nothing
+// determines it. Determinacy rejects it.
+gadget inverse(x: field) -> (inv_x: field) {
+    advice inv_x = inv(x);
+}

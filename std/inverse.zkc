@@ -1,0 +1,9 @@
+// inverse(x) -> (inv_x): inv_x = 1/x, meaningful only when x != 0.
+//
+// The assertion is infeasible at x == 0 (it would read 0 == 1), so proving
+// the gadget also establishes x != 0 — a fact callers can reuse. The result is
+// computed by advice, so bind it fresh:  let (r) = inverse(x);
+gadget inverse(x: field) -> (inv_x: field) {
+    advice inv_x = inv(x);
+    assert x * inv_x == 1;
+}

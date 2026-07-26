@@ -1,0 +1,11 @@
+// is_zero(x) -> (out): out = 1 when x == 0, else 0.
+//
+// `inv` is advice — the prover guesses 1/x, or 0 when x == 0. The two
+// assertions pin `out` down regardless: x == 0 forces out = 1, and x != 0
+// (x invertible) forces out = 0. Proved determinate by case-splitting on x.
+// Bind with:  (out) = is_zero(x);
+gadget is_zero(x: field) -> (out: field) {
+    advice inv = inv_or_zero(x);
+    assert x * inv == 1 - out;
+    assert x * out == 0;
+}

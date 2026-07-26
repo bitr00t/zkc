@@ -1,0 +1,9 @@
+// mux(sel, a, b) -> (out): out = a when sel == 1, b when sel == 0.
+//
+// `sel` is constrained to a bit; `out` is a linear function of the inputs
+// (b + sel*(a - b)), so it is determined immediately, with no case split.
+// Bind with:  (out) = mux(sel, a, b);
+gadget mux(sel: field, a: field, b: field) -> (out: field) {
+    assert sel * (1 - sel) == 0;
+    assert out == b + sel * (a - b);
+}

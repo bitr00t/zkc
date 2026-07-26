@@ -21,6 +21,7 @@ module Zkc.Syntax.Ast
   , Require(..)
   , GadgetDef(..)
   , Circuit(..)
+  , UseDecl(..)
   , Program(..)
   , exprSpan
   ) where
@@ -141,8 +142,19 @@ data Circuit = Circuit
   , circBody :: [Stmt]
   } deriving (Eq, Show)
 
--- | A whole source file: the gadget definitions plus the one circuit.
+-- | An include: @use std::is_zero;@ pulls a gadget from a library module.
+-- The compiler resolves it by reading @<module>/<item>.zkc@ and merging that
+-- gadget definition into the program before elaboration. (Phase 6, M.2)
+data UseDecl = UseDecl
+  { udModule :: String   -- ^ e.g. @std@
+  , udItem   :: String   -- ^ e.g. @is_zero@
+  , udLine   :: Int
+  } deriving (Eq, Show)
+
+-- | A whole source file: any includes, the gadget definitions, and the one
+-- circuit.
 data Program = Program
-  { progGadgets :: [GadgetDef]
+  { progUses    :: [UseDecl]
+  , progGadgets :: [GadgetDef]
   , progCircuit :: Circuit
   } deriving (Eq, Show)

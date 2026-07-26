@@ -8,6 +8,8 @@ import Data.List (isInfixOf)
 import qualified Data.Set as Set
 import System.Exit (exitFailure, exitSuccess)
 import System.IO (hSetEncoding, stdout, utf8)
+import System.IO.Error (tryIOError)
+import GHC.IO.Encoding (setLocaleEncoding)
 
 import Zkc.Analysis.Determinacy
 import qualified Zkc.Analysis.Poly as P
@@ -24,19 +26,102 @@ import Zkc.Lsp
   ( ServerState(..), initialState, handleMessage, diagnosticToLsp
   , frame, utf8Length )
 import Zkc.Profile (LineCost(..), profileSource)
+import Zkc.Reference (renderReference)
 import Zkc.Field (fieldModulus)
 import Zkc.Syntax.Ast
 import Zkc.Syntax.Lexer (lexer, Tok(..), Token(..))
-import Zkc.Syntax.Parser (parseProgram, parseCircuit)
+import Zkc.Syntax.Parser (parseProgram, parseCircuit, parseGadgets)
 
 main :: IO ()
 main = do
   hSetEncoding stdout utf8
-  results <- mapM runCase cases
+  setLocaleEncoding utf8
+  stdResults <- stdGadgetCases
+  m2Results <- sequence [includeCase, docCase]
+  let allCases = cases ++ stdResults ++ m2Results
+  results <- mapM runCase allCases
   let failures = length (filter not results)
-  putStrLn $ "\n" ++ show (length cases - failures) ++ "/" ++ show (length cases)
+  putStrLn $ "\n" ++ show (length allCases - failures) ++ "/" ++ show (length allCases)
              ++ " checks passed"
   if failures == 0 then exitSuccess else exitFailure
+
+-- | The standard library (M.1), checked as ordinary source: each gadget must
+-- prove determinate under a wrapper circuit, and its negative fixture — the
+-- under-constrained version shipped in @std/tests@ — must be rejected. The
+-- files read here are the ones actually shipped, so the test validates the
+-- artifacts rather than a copy of them. Paths are relative to @compiler/@, the
+-- directory the suite is run from.
+gadgetChecks :: [(String, String)]  -- ^ (file base name, wrapper circuit)
+gadgetChecks =
+  [ ("is_zero",    "circuit T { private x: field; output o: field; (o) = is_zero(x); }")
+  , ("inverse",    "circuit T { private x: field; output o: field; let (r) = inverse(x); assert o == r; }")
+  , ("assert_bit", "circuit T { private b: field; output o: field; (o) = assert_bit(b); }")
+  , ("mux",        "circuit T { private s: field; private a: field; private b: field; output o: field; (o) = mux(s, a, b); }")
+  , ("assert_range4","circuit T { private x: field; output o: field; (o) = assert_range4(x); }")
+  ]
+
+stdGadgetCases :: IO [(String, Bool)]
+stdGadgetCases = concat <$> mapM one gadgetChecks
+  where
+    one (base, wrapper) = do
+      good   <- readFileMaybe ("../std/" ++ base ++ ".zkc")
+      broken <- readFileMaybe ("../std/tests/" ++ base ++ "_broken.zkc")
+      let proves src = null (diagnoseSource "bn254" (src ++ "\n" ++ wrapper))
+      pure
+        [ ( "std: " ++ base ++ " is proved determinate"
+          , maybe False proves good )
+        , ( "std: " ++ base ++ " broken version is rejected"
+          , maybe False (not . proves) broken )
+        ]
+
+readFileMaybe :: String -> IO (Maybe String)
+readFileMaybe path = either (const Nothing) Just <$> tryIOError (readFile path)
+
+-- | M.2: a circuit that @use@s a std gadget resolves and compiles end to end —
+-- the include is parsed, the library gadget merged, and determinacy proved.
+includeCase :: IO (String, Bool)
+includeCase = do
+  lib <- readFileMaybe "../std/is_zero.zkc"
+  let circuitSrc = unlines
+        [ "use std::is_zero;"
+        , "circuit C { private x: field; output o: field; (o) = is_zero(x); }" ]
+      ok = case (parseProgram circuitSrc, lib >>= eitherToMaybe . parseGadgets) of
+             (Right prog, Just gs)
+               | [UseDecl "std" "is_zero" _] <- progUses prog ->
+                   let merged = prog { progGadgets = gs ++ progGadgets prog }
+                   in case elaborate "bn254" merged of
+                        Right e -> either (const False) (const True)
+                          (checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e))
+                        Left _ -> False
+             _ -> False
+  pure ("std: a circuit that uses a std gadget compiles end to end", ok)
+
+-- | M.2: the generated reference states exactly what the proof established —
+-- is_zero's case split and inverse's exported nonzero fact both appear.
+docCase :: IO (String, Bool)
+docCase = do
+  libs <- sequence <$> mapM readFileMaybe ["../std/is_zero.zkc", "../std/inverse.zkc"]
+  let circuitSrc = unlines
+        [ "circuit C { private x: field; private y: field;"
+        , "  output o: field; output r: field;"
+        , "  (o) = is_zero(x); let (ir) = inverse(y); assert r == ir; }" ]
+      gadgetsFrom = fmap concat . mapM (eitherToMaybe . parseGadgets)
+      ok = case (parseProgram circuitSrc, libs >>= gadgetsFrom) of
+             (Right prog, Just gs) ->
+               let merged = prog { progGadgets = gs ++ progGadgets prog }
+               in case elaborate "bn254" merged of
+                    Right e -> case gadgetSummaries bn254 (elabGadgetBodies e) of
+                      Right summaries ->
+                        let doc = renderReference summaries
+                        in "determined by cases: x == 0; x != 0" `isInfixOf` doc
+                           && "guarantees: x != 0" `isInfixOf` doc
+                      Left _ -> False
+                    Left _ -> False
+             _ -> False
+  pure ("std: generated reference matches the determinacy summaries", ok)
+
+eitherToMaybe :: Either a b -> Maybe b
+eitherToMaybe = either (const Nothing) Just
 
 runCase :: (String, Bool) -> IO Bool
 runCase (name, ok) = do
@@ -900,6 +985,17 @@ cases =
       in "3 constraints, 3 rows" `isInfixOf` out
          && "1 constraints, 2 rows" `isInfixOf` out
          && "\"paddingLeft\":true" `isInfixOf` out )
+
+  -- Includes (phase 6, M.2) --------------------------------------------
+  , ( "use: a `use std::is_zero;` prefix parses into progUses"
+    , case parseProgram "use std::is_zero;\ncircuit C { private x: field; output o: field; assert o == x; }" of
+        Right prog -> progUses prog == [UseDecl "std" "is_zero" 1]
+        Left _ -> False )
+
+  , ( "use: a library file rejects a stray circuit"
+    , case parseGadgets "gadget g(x: field) -> (o: field) { assert o == x; }\ncircuit C { private x: field; output o: field; assert o == x; }" of
+        Left d -> "only gadgets" `isInfixOf` diagMessage d
+        Right _ -> False )
 
   -- SMT escalation: the query, built without ever running a solver -----
   , ( "smt: the failing scope is named, so escalation asks about it alone"

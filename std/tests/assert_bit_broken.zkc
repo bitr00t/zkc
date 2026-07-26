@@ -1,0 +1,5 @@
+// BROKEN: out is declared but never constrained (the `out == b` assertion is
+// gone). Determinacy rejects it.
+gadget assert_bit(b: field) -> (out: field) {
+    assert b * (1 - b) == 0;
+}
