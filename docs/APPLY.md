@@ -1,67 +1,47 @@
-# zkc — Phase 6, M (the gadget standard library)
+# zkc — Phase 7, begin (N.1: the executable IR specification)
 
-A `std/` of reviewed `.zkc` gadgets, each ordinary source proved determinate by
-the same analysis as user code, plus a `use` include mechanism and a generated
-reference. The library is not trusted — it is *checked*: the compiler would
-reject an under-constrained gadget, and each gadget ships with a negative
-fixture proving it does.
+Phase 7 is the roadmap's last: **recursion and formal verification of the
+lowering.** This drop opens it — the full design note (`docs/phase7.md`) plus the
+first workstream increment, N.1.
 
-**Prerequisite:** builds on J (structured diagnostics/spans), K (the LSP), and L
-(per-line profiling). Apply `zkc_phase6_j1_j2.zip`, `_k.zip`, `_l.zip` first; the
-files here overlay on top and supersede L's `Determinacy.hs` and `tests/Spec.hs`.
+## The design (docs/phase7.md)
+Phase 7 has two halves. **N — formal verification of the lowering:** the
+IR→R1CS/Plonkish lowering has been differential-tested since phase 4 (the two
+arithmetizations agree with *each other*), but never against an independent
+statement of what the IR *means* — so two lowerings wrong in the same way would
+agree. **O — recursion:** make "this proof verifies" a circuit a proof can
+assert. Order N → O; within N, N.1 (a spec) → N.2 (per-rule proofs) → N.3 (a
+mutation harness proving the spec can fail).
 
-## M.1 — Core gadgets, in the language
-Five gadgets under `std/`, each gadget-only source (a library file), each proved
-determinate by the decidable core and each with an under-constrained negative
-fixture under `std/tests/` that determinacy rejects:
+## N.1 — An executable IR specification (this drop)
+`Ir::is_satisfied` / `Ir::unmet` (in `backend/zkc-core/src/ir.rs`) fix the
+meaning of the IR against a complete wire assignment, naming no arithmetization:
+the constant-one wire is 1, every arithmetic node equals its operation on its
+arguments, every assertion holds, and a *hint* node is unconstrained (the
+prover's freedom the determinacy system disciplines). It returns the list of
+`Unmet` obligations, empty when the assignment is a model.
 
-- `is_zero(x) -> (out)`        — out = [x == 0]; proved by case split on x.
-- `inverse(x) -> (inv_x)`      — inv_x = 1/x; exports the fact x != 0.
-- `assert_bit(b) -> (out)`     — constrains b to {0,1}, returns it.
-- `mux(sel, a, b) -> (out)`    — out = sel ? a : b; sel constrained to a bit.
-- `assert_range4(x) -> (out)`  — small-range check: constrains x to {0,1,2,3}.
-
-The tests (in `tests/Spec.hs`) read the shipped files, wrap each in a circuit,
-and assert the good version proves and the broken version is rejected.
-
-**Two gadgets from the design list are intentionally deferred.** `is_equal`
-(zero-test on a - b) and general bit decomposition are not provable by the
-decidable core: it case-splits on input *atoms*, so it proves `is_zero(x)` (x is
-an atom) but not `is_zero(a - b)`, and bit decomposition needs a case analysis
-the core does not do. Both are provable via SMT escalation, which needs a solver
-(z3/cvc5) not present in this environment, so they are left out rather than
-shipped untested. This matches the design's "small and core, not comprehensive"
-scope; a decomposition *hint* primitive would let the range/bits family grow.
-
-## M.2 — Includes and a documented interface
-- **Include mechanism.** A `use std::is_zero;` prefix (new `use` keyword in the
-  lexer, `UseDecl` in the AST, `pUses` in the parser). `Main` resolves each
-  include by reading `<module>/<item>.zkc`, parsing it with the new library
-  parser `parseGadgets`, and merging its gadgets into the program before
-  elaboration (dedup by name). The `std` module resolves to `$ZKC_STD_PATH`, or
-  `./std` by default.
-- **Generated reference.** `zkc doc <file.zkc>` proves each gadget and renders
-  its determinacy *summary* — signature, the case split the proof used, and any
-  nonzero facts it requires or guarantees. Because it is generated from the same
-  summaries the proof caches, it cannot drift from what was proved. The shipped
-  `std/REFERENCE.md` is its output. New module: `compiler/src/Zkc/Reference.hs`;
-  new export `gadgetSummaries` in `Analysis/Determinacy.hs`.
+This is the third party the differential test lacked. New tests
+(`backend/zkc-core/tests/core_tests.rs`, phase-7 section) pin all three together:
+- `spec_agrees_with_both_lowerings_on_honest_witnesses` — spec ⟺ R1CS ⟺ Plonkish.
+- `spec_independently_rejects_the_forgery` — the spec names the unmet
+  `(x * out) == 0` assertion on the phase-0 attack, with no lowering consulted.
+- `spec_matches_both_lowerings_under_random_perturbation` — 300 random atom
+  assignments per fixture, re-solved, all three agree.
+- `spec_has_teeth_it_pins_a_node_equation_r1cs_does_not_read` — corrupting an
+  intermediate sum slips past R1CS (which folds the linear chain) but the spec
+  catches it, proving the oracle is independent, not a restatement of R1CS.
 
 ## Build / test
-    make -C compiler all
-    cd compiler && ghc -O0 -isrc -itests -outputdir build/test-objs \
-        -o build/spec tests/Spec.hs && ./build/spec        # 140/140 green
-
-    # include mechanism and reference, end to end:
-    ZKC_STD_PATH=std zkc build mycircuit.zkc      # mycircuit.zkc: `use std::is_zero;`
-    ZKC_STD_PATH=std zkc doc  mycircuit.zkc        # prints the gadget reference
+    cd backend && cargo test -p zkc-core        # 49 core tests (was 45), all green
 
 ## Notes
-- **A build fix is included.** The working `Parser.hs` exported `parseGadgets`
-  without defining it (a dangling export that broke the build). It is now
-  defined — as the library parser M.2 needs — so the frontend links again.
-- Every frontend change is additive: existing examples still compile, and the
-  determinacy / SMT / arithmetization behaviour is unchanged. Test progression:
-  126 (entering M) -> 140 (+2 include parsing, +10 std gadgets, +2 end-to-end).
-- The std files carry no circuit (they are libraries); `zkc build` a circuit
-  that `use`s them, or wrap them, to compile.
+- Additive and generic over `ZkField`; determinacy, SMT, witness solving, and
+  both lowerings are unchanged, and the phase-0 forgery is still rejected.
+- The two `unused import` warnings under `cargo test` are pre-existing in
+  `goldilocks_tests.rs` (phase 5), untouched here.
+- Local-only `backend/Cargo.lock` pins remain required to build (never commit):
+  `zeroize 1.8.1`, `zeroize_derive 1.4.2`, and for the arkworks path
+  `rayon 1.7.0` + `rayon-core 1.12.1` (rayon-core >=1.13 needs rustc >=1.80).
+- Next: N.2 (per-rule faithfulness via the SMT layer or exhaustion) and N.3
+  (the mutation harness), then O (a verifier in the language, and recursion).

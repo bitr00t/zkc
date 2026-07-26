@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use ark_bn254::Fr;
 use zkc_core::field::ZkField;
-use zkc_core::ir::Ir;
+use zkc_core::ir::{Ir, Unmet};
 use zkc_core::lower::{lower, lower_with};
 use zkc_core::plonkish::{lower_plonkish, lower_plonkish_with};
 use zkc_core::witness::{solve, SolveInputs};
@@ -1045,4 +1045,143 @@ fn equivalence_a_forged_output_is_caught_by_both_across_circuits() {
             "a forged output of {} was not rejected identically by both", ir.name
         );
     }
+}
+// --- Phase 7, N.1: an executable IR specification -----------------------
+//
+// The equivalence tests above check R1CS against Plonkish. Their one blind
+// spot is that two lowerings wrong in the *same* way would still agree. These
+// tests close it by adding a third party that names no arithmetization —
+// `Ir::is_satisfied`, the IR's own semantics — and pinning all three together.
+
+/// The IR spec and both lowerings must return the same verdict on an
+/// assignment, or one of the three disagrees with the other two.
+fn spec_and_lowerings_agree(ir: &Ir, wires: &[Fr]) -> Result<bool, String> {
+    let spec_ok = ir.is_satisfied::<Fr>(wires);
+    let lowered = verdicts_agree(ir, wires)
+        .map_err(|(r, p)| format!("R1CS={r} but Plonkish={p}"))?;
+    if spec_ok != lowered {
+        return Err(format!("spec={spec_ok} but lowerings={lowered}"));
+    }
+    Ok(spec_ok)
+}
+
+#[test]
+fn spec_agrees_with_both_lowerings_on_honest_witnesses() {
+    let cases: &[(&str, &[(&str, &str)], &[(&str, &str)])] = &[
+        (ISZERO_IR, &[("x", "0"), ("out", "1")], &[]),
+        (MULSQUARE_IR, &[("a", "2"), ("b", "3"), ("c", "36")], &[]),
+        (WIDESUM_IR,
+         &[("a","1"),("b","2"),("c","3"),("d","4"),("e","5"),("f","6"),("z","21")],
+         &[]),
+    ];
+    for (fixture, given, advice) in cases {
+        let ir = Ir::from_json(fixture).unwrap();
+        let wires = run(&ir, given, advice).0;
+        assert_eq!(
+            spec_and_lowerings_agree(&ir, &wires),
+            Ok(true),
+            "honest witness for {} should satisfy the spec and both lowerings", ir.name
+        );
+    }
+}
+
+#[test]
+fn spec_independently_rejects_the_forgery() {
+    // The phase-0 attack on the *correct* circuit: x = 5, claim out = 1, guess
+    // inv = 0. The spec must reject it on its own — the second assertion
+    // (x * out == 0) is unmet — and agree with both lowerings that it fails.
+    let ir = Ir::from_json(ISZERO_IR).unwrap();
+    let wires = run(&ir, &[("x", "5"), ("out", "1")], &[("inv", "0")]).0;
+
+    let unmet = ir.unmet::<Fr>(&wires);
+    assert!(
+        unmet.iter().any(|u| matches!(u, Unmet::Assertion { label, .. }
+            if label.contains("(x * out) == 0"))),
+        "the spec should name the unmet assertion, got {unmet:?}"
+    );
+    assert_eq!(spec_and_lowerings_agree(&ir, &wires), Ok(false));
+}
+
+#[test]
+fn spec_matches_both_lowerings_under_random_perturbation() {
+    // The general claim, stress-tested on the atoms (inputs and advice), with
+    // the intermediates re-solved so they stay consistent — the same domain the
+    // phase-4 equivalence test uses, now with the spec as arbiter of all three.
+    let cases: &[(&str, &[(&str, &str)], &[&str])] = &[
+        (ISZERO_IR, &[("x", "0"), ("out", "1")], &["x", "out", "inv"]),
+        (ISZERO_BROKEN_IR, &[("x", "5"), ("out", "1")], &["x", "out", "inv"]),
+        (MULSQUARE_IR, &[("a", "2"), ("b", "3"), ("c", "36")], &["a", "b", "c"]),
+    ];
+
+    let mut state: u64 = 0xd1b54a32d192ed03;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state >> 33
+    };
+
+    for (fixture, base_inputs, atoms) in cases {
+        let ir = Ir::from_json(fixture).unwrap();
+        let input_names: std::collections::HashSet<&str> =
+            ir.inputs.iter().map(|i| i.name.as_str()).collect();
+
+        for _ in 0..300 {
+            let mut input_map: HashMap<String, Fr> = HashMap::new();
+            let mut advice_map: HashMap<String, Fr> = HashMap::new();
+            for name in *atoms {
+                let value = Fr::from_u64(next());
+                if input_names.contains(name) {
+                    input_map.insert((*name).to_string(), value);
+                } else {
+                    advice_map.insert((*name).to_string(), value);
+                }
+            }
+            for (name, value) in inputs(base_inputs) {
+                input_map.entry(name).or_insert(value);
+            }
+            let wires = solve::<Fr>(
+                &ir,
+                &SolveInputs { inputs: &input_map, advice_overrides: &advice_map },
+            ).unwrap();
+
+            assert!(
+                spec_and_lowerings_agree(&ir, &wires).is_ok(),
+                "{}: {:?}", ir.name, spec_and_lowerings_agree(&ir, &wires)
+            );
+        }
+    }
+}
+
+#[test]
+fn spec_has_teeth_it_pins_a_node_equation_r1cs_does_not_read() {
+    // The spec is a genuinely independent oracle, not a restatement of R1CS.
+    // R1CS folds a chain of additions into one linear combination and never
+    // materialises the intermediate sums, so corrupting one slips past it;
+    // the spec checks each node equation directly and catches it. (This is the
+    // seam N.3 will widen into a full mutation harness.)
+    let ir = Ir::from_json(WIDESUM_IR).unwrap();
+    let mut wires = run(
+        &ir,
+        &[("a","1"),("b","2"),("c","3"),("d","4"),("e","5"),("f","6"),("z","21")],
+        &[],
+    ).0;
+
+    // The first `add` node is an intermediate sum, used only linearly.
+    let add_wire = ir.nodes.iter()
+        .find(|n| matches!(n.op, zkc_core::ir::NodeOp::Add { .. }))
+        .unwrap().wire as usize;
+    wires[add_wire] = wires[add_wire].add(Fr::one());
+
+    let r1cs = lower::<Fr>(&ir).unwrap();
+    assert!(
+        r1cs.is_satisfied(&r1cs.assignment(&wires)),
+        "R1CS folds the linear chain and does not read the intermediate sum"
+    );
+    assert!(
+        !ir.is_satisfied::<Fr>(&wires),
+        "the spec checks the node equation and must catch the corruption"
+    );
+    assert!(
+        ir.unmet::<Fr>(&wires).iter().any(|u| matches!(u, Unmet::Node { op: "add", .. })),
+        "the spec should name the corrupted add node"
+    );
 }

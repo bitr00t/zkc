@@ -8,6 +8,8 @@
 use serde::Deserialize;
 use std::collections::HashSet;
 
+use crate::field::ZkField;
+
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -251,5 +253,97 @@ impl Ir {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Evaluate the IR's own semantics against a complete wire assignment and
+    /// return every obligation the assignment fails; an empty result means the
+    /// assignment is a model of the circuit. (Phase 7, N.1.)
+    ///
+    /// This fixes the meaning of the IR *independently of any lowering*, so it
+    /// can serve as the third party the differential test lacked: where phase 4
+    /// checks R1CS against Plonkish, this checks both against the IR itself.
+    /// The meaning is exactly:
+    ///
+    /// * the constant-one wire holds 1,
+    /// * every arithmetic node equals its operation applied to its arguments,
+    /// * every assertion's two sides are equal, and
+    /// * a *hint* node imposes nothing — its wire is a value the prover chooses,
+    ///   the unconstrained freedom the determinacy type system disciplines.
+    ///
+    /// `wires` must be a complete assignment (`wire_count()` entries); a value
+    /// referenced out of range is reported rather than panicking.
+    pub fn unmet<F: ZkField>(&self, wires: &[F]) -> Vec<Unmet> {
+        let mut unmet = Vec::new();
+        let get = |i: u32| wires.get(i as usize).copied();
+
+        match get(self.const_one_wire) {
+            Some(v) if v == F::one() => {}
+            _ => unmet.push(Unmet::ConstOne),
+        }
+
+        for node in &self.nodes {
+            // A hint is unconstrained: the prover chooses its wire.
+            if let NodeOp::Hint { .. } = node.op {
+                continue;
+            }
+            let args = node.op.args();
+            let arg = |k: usize| args.get(k).and_then(|&w| get(w));
+            let expected = match &node.op {
+                NodeOp::Const { value } => F::from_decimal(value).ok(),
+                NodeOp::Add { .. } => bin(arg(0), arg(1), F::add),
+                NodeOp::Sub { .. } => bin(arg(0), arg(1), F::sub),
+                NodeOp::Mul { .. } => bin(arg(0), arg(1), F::mul),
+                NodeOp::Neg { .. } => arg(0).map(F::neg),
+                NodeOp::Hint { .. } => unreachable!("hints handled above"),
+            };
+            match (expected, get(node.wire)) {
+                (Some(want), Some(have)) if want == have => {}
+                _ => unmet.push(Unmet::Node { wire: node.wire, op: op_name(&node.op) }),
+            }
+        }
+
+        for (index, assertion) in self.assertions.iter().enumerate() {
+            match (get(assertion.lhs), get(assertion.rhs)) {
+                (Some(l), Some(r)) if l == r => {}
+                _ => unmet.push(Unmet::Assertion {
+                    index,
+                    label: assertion.label.clone(),
+                }),
+            }
+        }
+
+        unmet
+    }
+
+    /// Whether an assignment is a model of the IR's own semantics (N.1).
+    pub fn is_satisfied<F: ZkField>(&self, wires: &[F]) -> bool {
+        self.unmet::<F>(wires).is_empty()
+    }
+}
+
+/// A single obligation an assignment fails to meet, expressed against the IR's
+/// own meaning with no reference to any lowering (phase 7, N.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unmet {
+    /// The constant-one wire does not hold 1.
+    ConstOne,
+    /// A node's wire does not equal its operation applied to its arguments.
+    Node { wire: u32, op: &'static str },
+    /// An assertion's two sides disagree.
+    Assertion { index: usize, label: String },
+}
+
+fn bin<F: ZkField>(a: Option<F>, b: Option<F>, f: fn(F, F) -> F) -> Option<F> {
+    Some(f(a?, b?))
+}
+
+fn op_name(op: &NodeOp) -> &'static str {
+    match op {
+        NodeOp::Const { .. } => "const",
+        NodeOp::Add { .. } => "add",
+        NodeOp::Sub { .. } => "sub",
+        NodeOp::Mul { .. } => "mul",
+        NodeOp::Neg { .. } => "neg",
+        NodeOp::Hint { .. } => "hint",
     }
 }
