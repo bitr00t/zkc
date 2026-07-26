@@ -23,234 +23,254 @@ early phases:
    not an R1CS in disguise. Proven by lowering the *same* IR two independent
    ways (R1CS and Plonkish) with identical results.
 2. **Everything is generic over the field**, via the `ZkField` trait. Proven by
-   running the existing lowerings over a hand-written Goldilocks field with
-   identical constraint counts to BN254.
+   running the lowerings over a hand-written Goldilocks field with identical
+   constraint counts to BN254.
 
 The recurring proof-of-work throughout is a specific bug — the **"phase-0
 forgery"**: the `IsZero` circuit with `inv` overridden to 0, `x=5`, `out=1`,
 which satisfies one assertion while claiming a false output. Every layer added
-(SMT, Plonkish, the STARK) is tested to reject it.
+(SMT, Plonkish, the STARK, the recursion work) is tested to reject it.
 
 ---
 
 ## 2. Implementation progress
 
+**All seven roadmap phases are done.** The roadmap is complete; work now is
+hardening the two remaining soundness boundaries and building on the phase-7
+primitives.
+
 | Phase | Scope | Status |
 |---|---|---|
-| 0–2 | Frontend, determinacy type system, R1CS, borrowed Groth16 prover | **done** (prior) |
+| 0–2 | Frontend, determinacy type system, R1CS, borrowed Groth16 prover | **done** |
 | 3 | Gadgets, SMT escalation, constraint fusion | **done** |
 | 4 | Own arithmetization: Plonkish from the same IR | **done** |
 | 5 | Own prover: FRI/STARK over Goldilocks, retiring arkworks | **done** |
-| 6 | Tooling: language server, profiler, gadget stdlib | **designed, not implemented** |
-| 7 | Recursion + formal verification of the lowering | not started |
+| 6 | Tooling: language server, profiler, gadget stdlib | **done** |
+| 7 | Recursion + formal verification of the lowering | **done** |
 
-**Test status: 81 backend tests, 90/90 frontend checks, all green, zero warnings.**
+**Test status: 122 backend tests, 158/158 frontend checks, all green, zero
+warnings.**
 
-### Phase 3 — done
-- **A (gadgets):** parameterised gadget definitions with compositional
-  determinacy; `gadget name(p: field) -> (r: field) { require ...; }`; proven
-  once per gadget, summary applied at each instance.
-- **B (SMT escalation):** three-valued determinacy `Proved | Refuted | Unknown`.
-  `compiler/src/Zkc/Analysis/Smt.hs`. Query = uniqueness-as-self-composition
-  (two witnesses, same inputs — can an output differ? unsat = proved, sat =
-  forgery). Refutation prints the actual forged witness. Flags: `--no-smt`
-  (exact phase-2 behaviour), `--smt-solver`, `--smt-dialect ff|int`,
-  `--smt-timeout`, `--dump-smt`.
-- **C (fusion + benchmark):** multiplicative-assertion fusion in the R1CS
-  lowering (`assert a*b==c` → 1 constraint instead of 2). `lower_with(ir, fuse)`.
-  Measured 50% reduction on `ManyProducts` n=64.
+### Phase 6 — done
+- **J (structured diagnostics):** JSON diagnostics beside the human `render`
+  (`Diagnose.hs`, `Json.hs`), columns through the lexer and spans through the
+  AST where diagnostics land.
+- **K (language server):** an LSP server reusing the compiler as a library
+  (`Lsp.hs`), publishing determinacy diagnostics with hovers/lenses surfacing
+  the determinacy proof.
+- **L (profiler):** per-source-line constraint-cost attribution via the
+  lowering's `origin` strings (`Profile.hs`); sums reconcile with `zkc-stats`.
+- **M (gadget stdlib):** a `std/` of gadgets written in `.zkc`, each proved
+  determinate by the same analysis, each with a negative fixture, plus a `use`
+  include mechanism (`Reference.hs`, `std/REFERENCE.md`).
 
-### Phase 4 — done (`docs/README_phase4.md`)
-- **D (Plonkish):** `backend/zkc-core/src/plonkish.rs`. Rows with 5 selectors +
-  3 cells, gate identity `q_L·a + q_R·b + q_O·c + q_M·a·b + q_C = 0`, copy
-  constraints as explicit wiring. Gate fusion hits targets: IsZero 7→2, ManyMul
-  16→8, WideSum 6→5.
-- **E (validation + equivalence):** `validate()` checks the lowering is
-  well-formed (catches unwired sharing, selectors on empty cells).
-  `verdicts_agree` — R1CS and Plonkish reach the same verdict on the same
-  witness. **Key finding:** free variables are *atoms* (inputs+advice), not
-  computed wires; the witness solver is the arbiter of intermediates.
-- **F (cost + CLI):** `zkc-stats` binary reports both arithmetizations'
-  costs side by side. `zkc-prove --arith r1cs|plonkish`; the determinacy record
-  travels identically on both paths.
+### Phase 7 — done (`docs/phase7.md`)
+- **N (formal verification of the lowering):** N.1 an executable IR spec
+  (`Ir::is_satisfied` / `unmet` in `backend/zkc-core/src/ir.rs`); N.2 per-rule
+  faithfulness, exhaustively over F₁₃ (`lowering_faithfulness_tests.rs`); N.3 a
+  mutation harness (each lowering mutation is caught).
+- **O (recursion):** O.1 a FRI-fold verifier written *in the language*
+  (`std/fri_fold.zkc`, `std/rlc.zkc`, `examples/fri_verify.zkc`); O.2 a real
+  fold verified inside an outer proof (`recursion_tests.rs`).
+- **The full in-circuit FRI verifier** — Merkle-path openings + fold + final
+  check, verifying a real FRI query *inside* an outer STARK
+  (`std/hash_leaf.zkc`, `std/compress.zkc`, `examples/fri_verify_full.zkc`,
+  `fri_verifier_tests.rs`).
+- **In-circuit Fiat–Shamir** — the fold challenge derived from the commitment
+  in-circuit, bit-exact with the backend transcript (`std/fs_challenge.zkc`,
+  `examples/fri_verify_fs.zkc`).
+- **The query index made algebraic** — `transcript.challenge_index` now
+  computes `challenge mod domain` (the canonical low bits) instead of folding
+  decimal digits, so the index is a genuine reduction of the challenge
+  (`index_binding_tests.rs`).
+- **The `bits` decomposition hint** — a new language primitive (see §3 and
+  `docs/bits-hint.md`), which unlocked general range checks (`std/range8.zkc`)
+  that the language could not previously express.
 
-### Phase 5 — done (`docs/README_phase5.md`, `docs/phase5-status.md`)
-- **G (field + FFT):** hand-written `goldilocks.rs` (`p = 2^64 - 2^32 + 1`,
-  fast reduction, Fermat inverse), differentially tested against arkworks on
-  50k+ inputs. `fft.rs` — NTT/iNTT/coset-LDE over a `TwoAdicField` trait.
-- **H (commitment + transcript):** `Hasher` trait (`hash.rs`), `merkle.rs`
-  commitment with tamper tests, `transcript.rs` Fiat–Shamir.
-- **I (the STARK):** `air.rs` (Plonkish → polynomial gate constraint + σ
-  permutation), `fri.rs` (low-degree test), `stark.rs` (commit trace, form
-  quotient, FRI, consistency check). **Includes the grand-product permutation
-  argument** for full wiring soundness — a broken wire is rejected.
-- End-to-end: honest witness proves and verifies; phase-0 forgery yields no
-  accepted proof; arkworks gone from the proving path.
-
-### Phase 6 — designed only (`docs/phase6.md`)
-Four workstreams (J, K, L, M) — see §5.
+### Real hash (a resolved phase-5 boundary)
+A real **Poseidon** over Goldilocks now exists (`backend/zkc-core/src/poseidon.rs`)
+behind the `Hasher` trait, exercised end-to-end through the STARK
+(`stark_poseidon_tests.rs`). The earlier `ToyHash` (`x^7`) is retained only for
+small in-circuit verifier tests where a trivially-expressible hash keeps the
+example circuits legible.
 
 ---
 
-## 3. Key decisions
+## 3. Key decisions (recent additions)
 
-- **Determinacy as uniqueness-as-self-composition** (phase 3B): ask the solver
-  whether two witnesses sharing inputs can differ on an output. Clean, and it
-  gives a real forged witness on failure.
-- **SMT soundness asymmetry** (phase 3B): a scope that includes proven gadget
-  summaries is a *relaxation*, so `unsat` (a proof) carries over safely, but
-  `sat` (an apparent forgery) is downgraded to `Unknown` rather than trusted.
-- **Plonkish, not trace-AIR** (phase 4): circuits are combinational; the gate
-  graph maps to rows + copy constraints. This choice is what made phase 5
-  tractable — a STARK proves a Plonkish table almost directly.
-- **Free variables are atoms** (phase 4E): the equivalence between
-  arithmetizations quantifies over inputs and advice only; computed wires are
-  fixed by the shared witness solver. Found by a differential test that first
-  failed — the encodings were both right and the *comparison* was wrong.
-- **Field hand-written, hash borrowed, FRI hand-written** (phase 5): the hash
-  is the single most security-critical component, so it lives behind a `Hasher`
-  trait and is instantiated (eventually) with a reviewed arithmetic hash; the
-  field and FRI are the point of the phase and are built in-house.
-- **The gate constraint alone catches the forgery** (phase 5I): the phase-0
-  forgery is a *gate* violation, so it is rejected even without the permutation
-  argument — which is why the wiring argument could be layered on afterward
-  without weakening the core security claim.
-- **Phase 6 breaks the "frontend untouched" invariant, honestly** (phase 6):
-  tooling *is* frontend work. The replacement discipline: every frontend change
-  is additive and regression-tested against the 90 frontend checks; the
-  determinacy analysis is *surfaced*, not recomputed.
+Earlier decisions (uniqueness-as-self-composition; SMT soundness asymmetry;
+Plonkish over trace-AIR; free variables are atoms; gate constraint alone catches
+the forgery) still stand. New with phase 7:
+
+- **The in-circuit index binding is determinate but *unsound* — a finding, not a
+  feature.** The natural binding `challenge == index + domain*high` (index bits
+  constrained) *proves determinate* — `idx` is a function of the inputs — yet is
+  forgeable: `high` is free, so the prover hits any index via
+  `high = (challenge - index)/domain`. The lesson: **determinacy rules out
+  under-constrained outputs; it does not certify that an output equals a
+  canonical reduction** (a range property). Demonstrated with proof in
+  `index_binding_tests.rs` and `examples/index_from_challenge.zkc`; written up in
+  `docs/in-circuit-index.md`. This is what motivated the `bits` hint.
+- **`bits` desugars in the parser, not the elaborator.** `advice (b0,..,bk) =
+  bits(x);` expands to single-bit advice + a `b_i*(1-b_i)==0` constraint each +
+  the reconstruction `x == Σ b_i*2^i`. No new elaborator machinery; the
+  reconstruction is the load-bearing part (it both pins the bits and range-limits
+  `x` to `[0, 2^(k+1))`).
+- **`bits` determinacy is a marking, not a search (`closeBits`).** A bit
+  decomposition is exactly the case the decidable core could not settle (one
+  equation, many unknowns) and that older phases left to SMT. The `closeBits`
+  rule instead certifies it directly: *once a bits node's source is determined,
+  so are its bits*, sound because binary decomposition is injective on
+  `[0, 2^n)`. Being a marking (not a case-split), it costs nothing and **scales**
+  — 32- and 62-bit decompositions prove as readily as 2-bit — which is what makes
+  `bits`-based range checks practical without SMT. (Limitation: the pre-pass
+  marks bits from sources determined *before* the search; a source determined
+  only mid-search is a false negative, never unsound.)
+- **The hint IR is a string + optional bit index, not an enum.** The backend
+  hint node carries `hint: String` + `bit: Option<u32>` (was a `HintKind` enum),
+  so new hint kinds are additive and backward-compatible; the witness solver
+  reads bit `i` of the argument's canonical representative.
 
 ---
 
 ## 4. Open issues and explicit boundaries
 
-These are deliberately unfinished and marked as such — not bugs, but scoped-out
-work.
+Deliberately unfinished, scoped-out work — not bugs.
 
-- **Phase 5 — DEEP / FRI-batch (the one soundness boundary).** FRI proves the
-  composite *quotient* is low-degree. The committed trace and grand-product `Z`
-  columns are opened for the consistency check but not themselves folded into
-  the low-degree test. Binding them (the standard DEEP step) is the remaining
-  hardening for full arithmetic soundness against a prover who commits
-  non-polynomial columns. Does not affect the honest / forgery / wiring results.
-- **Phase 5 — the hash is a stand-in.** Tests use `ToyHash` (an `x^7`
-  permutation), explicitly not vetted. Swapping in a reviewed Poseidon or
-  Rescue-Prime over Goldilocks is a *leaf change* — everything is written
-  against the `Hasher` trait — but it is not done.
-- **Phase 3 C.2 — full SHA-256/Merkle benchmark blocked.** Needs intermediate
-  composition (fresh non-output result wires) that was deferred, and Circom (for
-  cross-comparison) is unavailable in the build environment.
-- **SMT — cvc5 cannot solve finite-field queries.** The cvc5 build available
-  has no CoCoA backend, so `QF_FF` queries are only syntactically verified,
-  never solved. z3 4.8.12 works for the `QF_NIA` (integer-mod) dialect, which is
-  what the refutation tests actually run against.
-- **Toolchain — committed `Cargo.lock` needs local downgrades on cargo 1.75.**
-  The committed lock pulls edition-2024 transitive deps that need rustc ≥ 1.80.
-  Building on the environment's cargo 1.75 requires local downgrades (see §6);
-  these are **applied locally only and never committed to deliverables** — the
-  committed pins are left untouched.
+- **The sound in-circuit query index — the loop left open.** `bits` now makes
+  the needed range check on `high` expressible and provably determinate. What
+  remains for a *fully* sound field-index derivation is (a) range-checking `high`
+  to `[0, 2^62)` via `bits`, (b) the canonical check `challenge < p` (a
+  `bits`-based comparison against the modulus, needed because the field wraps at
+  `p ≈ 2^64` so a second decomposition of `challenge + p` can exist for small
+  challenges), and (c) wiring the whole derivation into the verifier so the
+  forgery in `index_binding_tests.rs` becomes a *rejection*. No missing primitive
+  now blocks this. See `docs/in-circuit-index.md`.
+- **Phase 5 — DEEP / FRI-batch (the one remaining core soundness boundary).**
+  FRI proves the composite *quotient* is low-degree; the committed trace and
+  grand-product `Z` columns are opened for the consistency check but not folded
+  into the low-degree test. Binding them (the standard DEEP step) is the
+  remaining hardening against a prover who commits non-polynomial columns. Does
+  not affect the honest / forgery / wiring results. Tracked in
+  `docs/phase5-status.md`.
+- **SMT is not runnable in the current container.** z3/cvc5 are not installed
+  here, so the SMT escalation path (phase 3B) cannot be exercised locally;
+  everything is proved via the decidable core (`--no-smt`). This is fine for the
+  whole stdlib and all phase-7 work — the `closeBits` rule means `bits` no longer
+  needs SMT — but cases genuinely outside the decidable fragment (e.g. `is_equal`
+  via `inv_or_zero`, or decompositions outside the `closeBits` pattern) still
+  require a solver and cannot be checked in this environment.
+- **Toolchain — `Cargo.lock` needs local downgrades; never commit them.** See §6.
 
 ---
 
 ## 5. Next steps
 
-The clear next unit of work is **Phase 6 implementation**, and within it the
-order is fixed by dependency: **J → (K, L in parallel) → M.**
+Two well-defined units, either order:
 
-**Start with J.1 — JSON diagnostics.** It is the smallest, most isolated, most
-testable frontend change, and everything else in the phase depends on structured
-diagnostics existing. Concretely: add a JSON emitter beside the existing
-`render` in `compiler/src/Zkc/Diagnostics.hs`, serialising the existing
-`Diagnostic { message, line, notes, help }` record. Round-trip test every
-existing diagnostic kind (determinacy failure, refutation, residual) through it.
-This touches the frontend but is purely additive — the regression bar is the
-existing 90 frontend checks staying green.
+1. **Close the in-circuit index loop (builds directly on `bits`).** Range-check
+   `high` and add the canonical `challenge < p` comparison, then re-point
+   `index_binding_tests.rs`: the forged index that currently *satisfies* the
+   naive binding should now be *rejected*, and the honest index accepted. This
+   turns the phase-7 finding into a solved problem and completes a genuinely
+   self-contained in-circuit verifier.
+2. **Finish the DEEP/FRI-batch hardening.** Fold the trace and `Z` columns into
+   the low-degree test. Well-defined, not a redesign; closes the last core
+   soundness boundary.
 
-Then:
-- **J.2** — thread columns through the lexer (it already walks characters) and
-  spans through the AST, only where diagnostics land (outputs, assertions,
-  gadget calls).
-- **K** — an LSP server (Haskell, reusing the compiler as a library) publishing
-  determinacy diagnostics; then hovers/lenses surfacing the `--explain` proof.
-- **L** — per-source-line cost attribution via the lowering's `origin` strings,
-  as a `zkc-profile` report and editor inlay hints. Sums must match `zkc-stats`.
-- **M** — a `std/` of gadgets written in `.zkc`, each proved determinate by the
-  same analysis (with a negative fixture each), plus an include mechanism.
-
-**Alternative**, if hardening is preferred over new features: finish the two
-phase-5 boundaries (DEEP batch; real hash). Both are well-defined and neither is
-a redesign.
+Both are hardening rather than new scope — the roadmap itself is complete.
 
 ---
 
 ## 6. How to build and test (environment notes)
 
-**Frontend (Haskell, GHC 9.4.7):**
+**Frontend (Haskell).** The compiler depends only on GHC boot libraries (base,
+containers, mtl) — there is no package manager in the loop, so *any* modern GHC
+works; the build just uses the active `ghc`.
 ```
 make -C compiler all                       # → compiler/build/zkc
 # tests:
-ghc -O0 -isrc -itests -outputdir build/test-objs -o build/spec tests/Spec.hs && ./build/spec
+cd compiler && ghc -O0 -isrc -itests -outputdir build/test-objs -o build/spec tests/Spec.hs && ./build/spec
 ```
 
-**Backend (Rust, cargo/rustc 1.75.0):**
+**IDE / HLS.** Because this is a bare-`ghc` project (no cabal/stack), HLS needs
+a cradle: `compiler/hie.yaml` (a `direct` cradle passing `-isrc -itests`) is
+**committed** — that is what lets HLS resolve the `Zkc.*` modules. Two toolchain
+lessons worth keeping (learned the hard way):
+- HLS ships one binary *per exact GHC point release*. Do **not** chase the newest
+  GHC; pick one whose HLS binary reliably exists — **9.8.4** or **9.6.7** are
+  safe (full support, stable Windows bindists). The wrapper falls back to a
+  mismatched binary otherwise and reports "HLS does not support GHC x.y.z yet".
+- Keep HLS current via `ghcup` (`ghcup install hls latest && ghcup set hls
+  latest`), and set the VS Code Haskell extension's *Manage HLS* to `GHCup`. The
+  extension may still prompt to download the HLS build matching the active GHC —
+  let it.
+
+**Backend (Rust, cargo/rustc 1.75.0).**
 ```
-cd backend && cargo test                   # all tests
+cd backend && cargo test                   # all tests (122)
 cargo build --bin zkc-stats                # cost profiler (phase 4)
 cargo build --bin zkc-prove                # Groth16 + --arith path
 ```
 
-**Recurring toolchain fix** (local only, do NOT commit — the committed
+**Recurring toolchain fix** (local only, do **NOT** commit — the committed
 `Cargo.lock` pins are intentional):
 ```
 cargo update -p zeroize --precise 1.8.1
 cargo update -p zeroize_derive --precise 1.4.2
-# for the arkworks chain in zkc-prove additionally:
-cargo update -p rayon --precise 1.10.0
+cargo update -p rayon --precise 1.7.0
 cargo update -p rayon-core --precise 1.12.1
 ```
-`zkc-core` builds standalone (only serde / serde_json / ark-ff) once `zeroize`
-is downgraded; `zkc-prove` (arkworks/Groth16) also needs the `rayon` downgrades.
+`zkc-core` builds standalone once `zeroize` is downgraded; the arkworks chain in
+`zkc-prove` additionally needs the `rayon` downgrades.
 
-**SMT:** z3 4.8.12 (works, `QF_NIA`). cvc5 1.3.4 available but no CoCoA (cannot
-solve `QF_FF`).
+**SMT:** not installed in the current container — see §4. The project code path
+exists (z3 `QF_NIA`; cvc5 `QF_FF` syntactic-only) but cannot be run here.
 
 ---
 
 ## 7. Repository map
 
 ```
-compiler/                        Haskell frontend
+compiler/                        Haskell frontend (boot libraries only)
+  hie.yaml                       HLS cradle: direct, -isrc -itests
+  Makefile                       bare ghc; SRC=src, BUILD=build
   src/Main.hs                    CLI: --explain, --no-smt, --smt-*, --dump-smt
   src/Zkc/
-    Syntax/{Lexer,Parser,Ast}.hs lexer tags tokLine; AST carries pdLine/gdLine
-    Analysis/{Determinacy,Smt}.hs the type system + SMT escalation
-    Core/, Emit/                 elaboration, IR emission
-    Field.hs, Diagnostics.hs     Diagnostic{message,line,notes,help}, render
-  examples/*.zkc                 iszero, divide, mul_square, relation, ...
-  tests/Spec.hs                  90 frontend checks
-
+    Syntax/{Lexer,Parser,Ast}.hs Parser desugars bits(); AST carries HintBit
+    Analysis/{Determinacy,Smt}.hs the type system (+ closeBits) and SMT escalation
+    Core/{Ir,Elaborate}.hs       elaboration; HintKind = KInvOrZero|KInv|KBits i
+    Emit/Json.hs                 IR emission (hint + bit index)
+    Diagnose.hs, Json.hs         structured + JSON diagnostics (phase 6 J)
+    Lsp.hs, Profile.hs           language server (K), cost profiler (L)
+    Reference.hs, Field.hs, Diagnostics.hs
+  tests/Spec.hs                  158 frontend checks
+  examples/*.zkc                 iszero, divide, mul_square, relation,
+                                 fri_verify{,_full,_fs}, index_from_challenge, ...
+std/                             gadget stdlib (each .zkc proved determinate)
+  is_zero, inverse, assert_bit, assert_range4, mux,           (phase 6 M)
+  fri_fold, rlc, hash_leaf, compress, fs_challenge,           (phase 7 O)
+  range8                                                       (phase 7, bits)
+  tests/*_broken.zkc             a negative fixture per gadget
+  REFERENCE.md
 backend/
-  zkc-core/                      kryptographiefrei; generic over ZkField
-    src/ir.rs                    the neutral Core IR (carries determinacy record)
-    src/field.rs                 ZkField + TwoAdicField traits
-    src/lower.rs, r1cs.rs        R1CS lowering + fusion
-    src/plonkish.rs              Plonkish lowering + gate fusion + validate
-    src/witness.rs               witness solver (arbiter of intermediates)
-    src/goldilocks.rs            hand-written field (phase 5)
-    src/fft.rs                   NTT/iNTT/coset-LDE
-    src/hash.rs, merkle.rs, transcript.rs   commitment + Fiat–Shamir
+  zkc-core/                      crypto-free; generic over ZkField
+    src/ir.rs                    neutral Core IR + executable spec (is_satisfied)
+    src/field.rs, goldilocks.rs  ZkField/TwoAdicField; hand-written Goldilocks
+    src/lower.rs, r1cs.rs, plonkish.rs   two lowerings + fusion + validate
+    src/witness.rs               witness solver (inv, inv_or_zero, bits)
+    src/fft.rs, hash.rs, poseidon.rs, merkle.rs, transcript.rs
     src/air.rs, fri.rs, stark.rs the STARK (gate constraint + permutation)
-    tests/                       core, goldilocks, fft, commitment, fri, stark
+    tests/                       core, goldilocks, fft, commitment, fri, stark,
+                                 poseidon, stark_poseidon, lowering_faithfulness,
+                                 recursion, fri_verifier, index_binding, bits
   zkc-prove/                     arkworks Groth16 (borrowed; being retired)
-    src/bin/zkc-prove.rs         --arith r1cs|plonkish
-    src/bin/zkc-stats.rs         cost comparison
-
 docs/
-  ROADMAP.md                     the 7-phase plan + per-phase detail
-  DESIGN_DECISIONS.md            recorded rationale
-  phase4.md, phase5.md, phase5-status.md, phase6.md
-  benchmarks.md                  cost tables + STARK-vs-Groth16 numbers
-  CHECKPOINT.md                  this file
+  ROADMAP.md, DESIGN_DECISIONS.md, README_phase0..5.md
+  phase5-status.md, phase6.md, phase7.md
+  bits-hint.md                   the decomposition-hint primitive
+  in-circuit-index.md            the determinate-but-unsound finding + status
+  benchmarks.md, CHECKPOINT.md   (this file)
 ```
 
 ---
@@ -273,5 +293,5 @@ neutral IR.
 
 The textbook trade: Groth16 keeps a large proof-size edge; the STARK needs no
 trusted setup, trusts only a hash, and is faster on small circuits. (Caveats:
-tiny-circuit timings favour the STARK; its proof size is inflated by the
-stand-in hash and an unoptimised opening format.)
+tiny-circuit timings favour the STARK; its proof size is inflated by the opening
+format.)
