@@ -37,7 +37,7 @@ main = do
   hSetEncoding stdout utf8
   setLocaleEncoding utf8
   stdResults <- stdGadgetCases
-  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase, friVerifyFullCase, friVerifyFsCase]
+  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase, friVerifyFullCase, friVerifyFsCase, indexBindingCase]
   let allCases = cases ++ stdResults ++ m2Results
   results <- mapM runCase allCases
   let failures = length (filter not results)
@@ -186,6 +186,23 @@ friVerifyFsCase = do
                     Left _ -> False
              _ -> False
   pure ("verifier: the Fiat-Shamir verifier (challenge derived in-circuit) is proved determinate", ok)
+
+-- | O: the boundary of determinacy. The naive in-circuit index binding is
+-- *proved determinate* (idx is a function of the inputs) — yet it is unsound,
+-- because `high` is unconstrained and lets a prover hit any index. Determinacy
+-- rules out under-constrained outputs; it does not certify a canonical
+-- reduction. The frontend passing here is the point; the backend test
+-- (index_binding_tests) shows the unsoundness it cannot see.
+indexBindingCase :: IO (String, Bool)
+indexBindingCase = do
+  src <- readFileMaybe "../examples/index_from_challenge.zkc"
+  let ok = case src >>= eitherToMaybe . parseProgram of
+             Just prog -> case elaborate "bn254" prog of
+               Right e -> either (const False) (const True)
+                 (checkProgram bn254 (elabGadgetBodies e) (elabCircuitBody e))
+               Left _ -> False
+             Nothing -> False
+  pure ("verifier: the naive index binding is proved determinate (though unsound — see backend)", ok)
 
 -- | O.1: the verifier check is held to the determinacy discipline — its
 -- generated reference shows `folded` determined by a case split on x and the

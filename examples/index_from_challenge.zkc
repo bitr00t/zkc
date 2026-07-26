@@ -1,0 +1,31 @@
+// A cautionary example (phase 7, O): deriving a query index from a challenge
+// in-circuit — and why the determinacy type system is not enough here.
+//
+// The verifier wants the query index to be the low bits of the Fiat-Shamir
+// challenge, so the prover cannot choose which positions to open. The natural
+// binding is `challenge = index + domain*high` with the two index bits pinned:
+//
+//   determinacy PROVES `idx` determined — it is a function of the inputs.
+//
+// But it is NOT sound. `high` is unconstrained, so for ANY index in {0,1,2,3}
+// the prover can pick high = (challenge - index)/domain and satisfy every
+// constraint. The index is not bound to the challenge at all. Soundness needs
+// `high` range-checked (a full bit decomposition of the challenge), which needs
+// a decomposition hint the language does not yet provide. This file exists to
+// make that gap concrete; see backend/zkc-core/tests/index_binding_tests.rs.
+gadget derive_index(challenge: field, b0: field, b1: field, high: field) -> (idx: field) {
+    assert b0 * (1 - b0) == 0;
+    assert b1 * (1 - b1) == 0;
+    let index = b0 + 2 * b1;
+    assert challenge == index + 4 * high;
+    assert idx == index;
+}
+
+circuit IndexFromChallenge {
+    private challenge: field;
+    private b0: field;
+    private b1: field;
+    private high: field;
+    output idx: field;
+    (idx) = derive_index(challenge, b0, b1, high);
+}

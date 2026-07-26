@@ -81,25 +81,24 @@ impl<F: ZkField, H: Hasher<F>> Transcript<F, H> {
     }
 
     /// A challenge reduced to `[0, modulus_bound)` — a query index into a
-    /// domain of that size. The domain size is a power of two, so masking the
-    /// low bits is unbiased.
+    /// domain of that size. The domain size is a power of two, so this is the
+    /// low bits of the challenge's canonical representative: `challenge mod
+    /// domain`. Reducing this way (rather than folding the decimal image) makes
+    /// the index a genuine algebraic reduction of the challenge — the same value
+    /// an in-circuit derivation would have to reproduce.
     pub fn challenge_index(&mut self, domain_size: usize) -> usize {
         assert!(domain_size.is_power_of_two(), "domain size must be a power of two");
         let challenge = self.challenge();
-        // Reduce via the canonical decimal is overkill; use the low bits of the
-        // field element's own u64 image through from-decimal-free access.
-        let mask = domain_size - 1;
-        (challenge_low_bits(challenge)) & mask
+        challenge_mod(challenge, domain_size)
     }
 }
 
-/// Extract low bits of a field element for indexing. Goes through the decimal
-/// image so it stays field-generic (no assumption the field is a `u64`).
-fn challenge_low_bits<F: ZkField>(value: F) -> usize {
-    // The decimal is the canonical representative; its low digits vary with the
-    // element, and parsing back to u128 is enough for an index mask.
-    let decimal = value.to_decimal();
-    decimal
+/// Reduce a field element modulo a (power-of-two) `domain` — the low bits of its
+/// canonical representative. Computed field-generically from the decimal image,
+/// reducing at each digit so the accumulator stays small.
+fn challenge_mod<F: ZkField>(value: F, domain: usize) -> usize {
+    value
+        .to_decimal()
         .bytes()
-        .fold(0usize, |acc, b| acc.wrapping_mul(10).wrapping_add((b - b'0') as usize))
+        .fold(0usize, |acc, b| (acc * 10 + (b - b'0') as usize) % domain)
 }
