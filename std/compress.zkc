@@ -1,0 +1,18 @@
+// compress(l, r) -> (h): the 2-to-1 Merkle compression of the in-circuit
+// verifier (phase 7, O): h = sbox(l + 2) + sbox(r + 3), sbox(x) = x^7. Order
+// matters (the two addends use different constants), so left and right children
+// hash differently — exactly what an authentication path needs. Bind with:
+//     (h) = compress(l, r);
+gadget compress(l: field, r: field) -> (h: field) {
+    let a = l + 2;
+    let a2 = a * a;
+    let a4 = a2 * a2;
+    let a6 = a4 * a2;
+    let sl = a6 * a;
+    let b = r + 3;
+    let b2 = b * b;
+    let b4 = b2 * b2;
+    let b6 = b4 * b2;
+    let sr = b6 * b;
+    assert h == sl + sr;
+}

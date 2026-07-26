@@ -1,0 +1,11 @@
+// hash_leaf(v) -> (h): the leaf hash of the in-circuit Merkle verifier
+// (phase 7, O). A single-element leaf [v] hashes to sbox(v + 1), sbox(x) = x^7 —
+// the low-degree permutation the backend's circuit-friendly hasher uses, so the
+// gadget matches the committed tree bit for bit. Bind with:  (h) = hash_leaf(v);
+gadget hash_leaf(v: field) -> (h: field) {
+    let a = v + 1;
+    let a2 = a * a;
+    let a4 = a2 * a2;
+    let a6 = a4 * a2;
+    assert h == a6 * a;
+}

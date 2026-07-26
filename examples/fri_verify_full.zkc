@@ -1,0 +1,86 @@
+// A complete in-circuit FRI verifier for one query of a small proof (phase 7, O).
+//
+// This is the larger arc of workstream O: not just the algebraic fold (O.1), but
+// the *authenticity* check too. For a single query of a tiny FRI proof (domain
+// size 4, one fold round), it
+//   1. Merkle-verifies both openings — f(x) and f(-x) — against the committed
+//      root, hashing the leaf and walking the depth-2 authentication path with
+//      the position bits choosing left/right at each level;
+//   2. folds the two openings to the next layer (the O.1 relation); and
+//   3. checks that fold against the final codeword, which must be constant.
+//
+// Every value is determined by the proof openings, the paths, the challenge, and
+// the point — so "this query verifies" is an ordinary determinate circuit. The
+// folding challenge and query index are taken as inputs here; deriving them
+// in-circuit (Fiat-Shamir over the same hash) is the remaining depth.
+use std::hash_leaf;
+use std::compress;
+use std::mux;
+use std::fri_fold;
+
+circuit FriVerifyQuery {
+    // The query's two openings.
+    private lo: field;
+    private hi: field;
+    // Authentication path for lo: two siblings and the two position bits.
+    private lo_sib0: field;
+    private lo_sib1: field;
+    private lo_bit0: field;
+    private lo_bit1: field;
+    // Authentication path for hi.
+    private hi_sib0: field;
+    private hi_sib1: field;
+    private hi_bit0: field;
+    private hi_bit1: field;
+    // The committed root, the fold challenge and point, the final codeword.
+    private root: field;
+    private alpha: field;
+    private x: field;
+    private final0: field;
+    private final1: field;
+
+    // Merkle path intermediates must be named outputs to carry gadget results.
+    output lo_leaf: field;
+    output lo_left0: field;
+    output lo_right0: field;
+    output lo_node0: field;
+    output lo_left1: field;
+    output lo_right1: field;
+    output lo_root: field;
+    output hi_leaf: field;
+    output hi_left0: field;
+    output hi_right0: field;
+    output hi_node0: field;
+    output hi_left1: field;
+    output hi_right1: field;
+    output hi_root: field;
+    output folded: field;
+    output accepted: field;
+
+    // --- Merkle-verify lo against the root ---
+    (lo_leaf) = hash_leaf(lo);
+    (lo_left0)  = mux(lo_bit0, lo_sib0, lo_leaf);   // bit=1 ⇒ node is the right child
+    (lo_right0) = mux(lo_bit0, lo_leaf, lo_sib0);
+    (lo_node0)  = compress(lo_left0, lo_right0);
+    (lo_left1)  = mux(lo_bit1, lo_sib1, lo_node0);
+    (lo_right1) = mux(lo_bit1, lo_node0, lo_sib1);
+    (lo_root)   = compress(lo_left1, lo_right1);
+    assert lo_root == root;
+
+    // --- Merkle-verify hi against the root ---
+    (hi_leaf) = hash_leaf(hi);
+    (hi_left0)  = mux(hi_bit0, hi_sib0, hi_leaf);
+    (hi_right0) = mux(hi_bit0, hi_leaf, hi_sib0);
+    (hi_node0)  = compress(hi_left0, hi_right0);
+    (hi_left1)  = mux(hi_bit1, hi_sib1, hi_node0);
+    (hi_right1) = mux(hi_bit1, hi_node0, hi_sib1);
+    (hi_root)   = compress(hi_left1, hi_right1);
+    assert hi_root == root;
+
+    // --- Fold, and check it against the constant final codeword ---
+    (folded) = fri_fold(lo, hi, alpha, x);
+    assert folded == final0;
+    assert final0 == final1;
+
+    assert accepted == 1;
+}

@@ -1,0 +1,4 @@
+// BROKEN: h is never constrained. Determinacy rejects it.
+gadget compress(l: field, r: field) -> (h: field) {
+    assert l == l;
+}

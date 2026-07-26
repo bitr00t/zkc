@@ -1,0 +1,5 @@
+// BROKEN: h is never constrained. Determinacy rejects it.
+gadget hash_leaf(v: field) -> (h: field) {
+    let a = v + 1;
+    let a2 = a * a;
+}
