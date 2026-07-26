@@ -216,6 +216,7 @@ goStmt gadgetMap enclosing st stmt = case stmt of
       let (kindTag, argExpr) = case hint of
             HintInvOrZero e -> (KInvOrZero, e)
             HintInv e -> (KInv, e)
+            HintBit e i -> (KBits i, e)
       (argWire, st1) <- goExpr st argExpr
       let wire = stNext st1
           info = HintInfo kindTag name gadgetName line
@@ -446,6 +447,7 @@ goSkelStmt gadgetMap def st stmt = case stmt of
     let (kindTag, argExpr) = case hint of
           HintInvOrZero e -> (KInvOrZero, e)
           HintInv e -> (KInv, e)
+          HintBit e i -> (KBits i, e)
     (argWire, st1) <- goExpr st argExpr
     let wire = stNext st1
         info = HintInfo kindTag name (gdName def) line

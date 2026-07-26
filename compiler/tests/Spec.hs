@@ -63,6 +63,7 @@ gadgetChecks =
   , ("hash_leaf",  "circuit T { private v: field; output o: field; (o) = hash_leaf(v); }")
   , ("compress",   "circuit T { private l: field; private r: field; output o: field; (o) = compress(l, r); }")
   , ("fs_challenge","circuit T { private seed: field; private root: field; output o: field; (o) = fs_challenge(seed, root); }")
+  , ("range8",     "circuit T { private x: field; output o: field; (o) = range8(x); }")
   ]
 
 stdGadgetCases :: IO [(String, Bool)]
@@ -614,6 +615,11 @@ cases =
   , ( "parser: an unknown hint is rejected by name"
     , failsWith "'sqrt' is not a known hint"
         (parseProgram "circuit C { private x: field; advice w = sqrt(x); }") )
+
+  , ( "bits: a decomposed bit feeding an output proves determinate (closeBits rule)"
+    , null (diagnoseSource "bn254"
+        "gadget low_bit(x: field) -> (b: field) { advice (b0, b1, b2) = bits(x); assert b == b0; } \
+        \circuit C { private x: field; output b: field; (b) = low_bit(x); }") )
 
   , ( "parser: a file needs exactly one circuit"
     , failsWith "exactly one 'circuit'"

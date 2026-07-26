@@ -63,6 +63,7 @@ data ParamDecl = ParamDecl
 data Hint
   = HintInvOrZero Expr  -- ^ @1\/x@, or 0 when @x == 0@
   | HintInv Expr        -- ^ @1\/x@; the witness solver fails when @x == 0@
+  | HintBit Expr Int    -- ^ bit @i@ of @x@; produced only by @bits(..)@ desugaring
   deriving (Eq, Show)
 
 data Expr

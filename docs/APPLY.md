@@ -1,48 +1,53 @@
-# zkc — Phase 7, O: the query index, and the boundary of determinacy
+# zkc — Phase 7: the `bits` decomposition hint (language primitive)
 
-The follow-on to in-circuit Fiat-Shamir. The fold challenge is now derived
-in-circuit; the query index is the other Fiat-Shamir value. This drop makes the
-backend's index derivation honest and algebraic, and records — with proof — why
-the *in-circuit* index derivation cannot yet be done soundly.
+Adds `bits`, the language's third advice form after `inv`/`inv_or_zero`. It
+decomposes a value into its low bits and emits the constraints that pin them —
+the primitive the standard library flagged as missing, and the one the sound
+in-circuit query index was waiting on. Touches the frontend end to end
+(syntax -> determinacy) and the backend witness solver.
 
-**Prerequisite:** builds on the in-circuit Fiat-Shamir drop. Supersedes that
-drop's `compiler/tests/Spec.hs`.
+## Syntax
+    advice (b0, b1, .., bk) = bits(x);
+Binds k+1 names to x's low bits (least significant first), inside a gadget.
 
-## The backend, made algebraic
-`transcript.rs`: `challenge_index` used to fold the challenge's decimal digits —
-deterministic but not an algebraic function of the field element. It now derives
-`challenge mod domain`: the low bits of the canonical representative, the value
-an in-circuit derivation would have to reproduce. Prove and verify stay in
-lockstep, so the round trip is unchanged; the index is now a genuine reduction of
-the challenge. (`the_query_index_is_an_algebraic_reduction_of_the_challenge`.)
+## Frontend
+- `Ast.hs` — new `HintBit Expr Int` (bit i of x); produced only by desugaring.
+- `Parser.hs` — parses the tuple form and desugars it into primitives: one
+  single-bit advice per name, a `b_i*(1-b_i)==0` constraint each, and the
+  reconstruction `x == b0 + 2*b1 + ..`. No new elaborator machinery.
+- `Ir.hs` / `Emit/Json.hs` — hint kind `KBits i`, emitted as
+  `"hint":"bits","bit":i`.
+- `Elaborate.hs` — `HintBit e i -> (KBits i, e)` in both advice paths.
+- `Determinacy.hs` — the `closeBits` rule: once a bits node's source is
+  determined, so are its bits (binary decomposition is injective on [0,2^n)).
+  A marking, not a search — no SMT, and it scales (32- and 62-bit decompositions
+  prove as readily as 2-bit). Wired into both the flat and compositional passes.
 
-## The boundary, made concrete
-The natural in-circuit binding — `challenge == index + domain*high`, index bits
-constrained — **proves determinate** but is **unsound**: `high` is free, so the
-prover can hit any index via `high = (challenge - index)/domain`.
-- `examples/index_from_challenge.zkc` — proved determinate (frontend
-  `indexBindingCase`).
-- `naive_index_binding_is_determinate_but_unsound` (backend) — every index in
-  `{0,1,2,3}` satisfies it.
+## Backend
+- `ir.rs` — the hint node now carries `hint: String` + `bit: Option<u32>`
+  (was a `HintKind` enum). Backward-compatible: inv/inv_or_zero still parse.
+- `witness.rs` — solves a bits hint as bit `i` of the argument's canonical
+  representative.
 
-The lesson: determinacy rules out under-constrained *outputs*; it does not
-certify that an output equals a *canonical reduction*. That is a range property.
-
-## What's needed next
-A **decomposition hint** — advice `bits(x, n)` giving x's low bits with the
-constraints that reconstruct it — would let `high` be range-checked and make the
-derivation sound. Its determinacy needs the SMT-backed checker (as `is_equal`
-does). See `docs/in-circuit-index.md` for the full account.
+## What it unlocks
+- `std/range8.zkc` — a general `2^n` range check, replacing the membership
+  product that only scaled to tiny sets. The reconstruction forces the value
+  into `[0, 2^n)`; `bits_tests` shows out-of-range values rejected.
+- The range check the in-circuit query index needs — see the updated
+  `docs/in-circuit-index.md` (the binding no longer waits on a missing
+  primitive; one field-wraparound subtlety remains, itself now expressible).
 
 ## Build / test
-    cd backend && cargo test -p zkc-core --test index_binding_tests   # 2 green
-    cargo test -p zkc-core                                            # full suite green
-    cd ../compiler && ghc -O0 -isrc -itests -outputdir build/test-objs \
-        -o build/spec tests/Spec.hs && ./build/spec                  # 155/155
+    cd compiler && ghc -O0 -isrc -itests -outputdir build/test-objs \
+        -o build/spec tests/Spec.hs && ./build/spec        # 158/158
+    cd ../backend && cargo test -p zkc-core --test bits_tests   # 3 green
+    cargo test -p zkc-core                                       # full suite green
 
 ## Notes
-- The backend change is behaviour-preserving for FRI (prove/verify lockstep);
-  the commitment test's only assertion (indices land in range) still holds.
-- Test progression: frontend 154 -> 155; backend 117 -> 119.
+- Design notes: `docs/bits-hint.md` (the primitive), `docs/in-circuit-index.md`
+  (updated status).
+- Supersedes the prior drop's `Spec.hs`, `ir.rs`, `witness.rs`,
+  `in-circuit-index.md`, `ROADMAP.md`, and `assert_range4.zkc` (comment only).
+- Test progression: frontend 155 -> 158; backend 119 -> 122.
 - Local-only `backend/Cargo.lock` pins remain required (never commit): `zeroize
   1.8.1`, `zeroize_derive 1.4.2`, `rayon 1.7.0`, `rayon-core 1.12.1`.

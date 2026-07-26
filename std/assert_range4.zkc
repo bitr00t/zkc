@@ -1,8 +1,8 @@
 // assert_range4(x) -> (out): constrains x to {0, 1, 2, 3} and returns it.
 //
 // A small-range check by membership: the product is zero exactly on the set.
-// (A general 2^n range needs bit decomposition, which needs a decomposition
-// hint the language does not yet provide.) Bind with:
+// (A general 2^n range now has one: see std/range8.zkc, built on the `bits`
+// decomposition hint. This membership form stays handy for tiny sets.) Bind with:
 //     (out) = assert_range4(x);
 gadget assert_range4(x: field) -> (out: field) {
     assert x * (x - 1) * (x - 2) * (x - 3) == 0;

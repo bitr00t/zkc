@@ -1,0 +1,11 @@
+// range8(x) -> (out): constrain x to [0, 256) and return it (phase 7).
+//
+// The general range check the language could not express before the `bits`
+// decomposition hint. `bits(x)` supplies x's eight low bits and emits the
+// constraints that pin them — each a bit, their weighted sum equal to x — so the
+// sum, being in [0, 256), forces x into that range. Bind with:
+//     (out) = range8(x);
+gadget range8(x: field) -> (out: field) {
+    advice (b0, b1, b2, b3, b4, b5, b6, b7) = bits(x);
+    assert out == x;
+}

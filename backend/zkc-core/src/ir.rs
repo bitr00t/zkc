@@ -42,13 +42,6 @@ pub struct Input {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HintKind {
-    InvOrZero,
-    Inv,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum NodeOp {
@@ -58,7 +51,10 @@ pub enum NodeOp {
     Mul { args: Vec<u32> },
     Neg { args: Vec<u32> },
     Hint {
-        hint: HintKind,
+        hint: String,
+        /// The bit index, present only for `bits` hints.
+        #[serde(default)]
+        bit: Option<u32>,
         name: String,
         /// Which `gadget` block the advice was quarantined in. Advice is
         /// illegal outside one, so every hint has a gadget to point at.

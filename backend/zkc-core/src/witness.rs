@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use crate::field::ZkField;
-use crate::ir::{HintKind, Ir, NodeOp};
+use crate::ir::{Ir, NodeOp};
 
 pub struct SolveInputs<'a, F> {
     /// Value for every declared input, by name.
@@ -45,14 +45,25 @@ pub fn solve<F: ZkField>(ir: &Ir, args: &SolveInputs<F>) -> Result<Vec<F>, Strin
             NodeOp::Sub { .. } => arg(0).sub(arg(1)),
             NodeOp::Mul { .. } => arg(0).mul(arg(1)),
             NodeOp::Neg { .. } => arg(0).neg(),
-            NodeOp::Hint { hint, name, .. } => match args.advice_overrides.get(name) {
+            NodeOp::Hint { hint, bit, name, .. } => match args.advice_overrides.get(name) {
                 // A dishonest prover simply ignores the hint.
                 Some(override_value) => *override_value,
-                None => match hint {
-                    HintKind::InvOrZero => arg(0).inverse().unwrap_or_else(F::zero),
-                    HintKind::Inv => arg(0).inverse().ok_or_else(|| {
+                None => match hint.as_str() {
+                    "inv_or_zero" => arg(0).inverse().unwrap_or_else(F::zero),
+                    "inv" => arg(0).inverse().ok_or_else(|| {
                         format!("hint inv('{name}') is undefined: the argument is zero")
                     })?,
+                    "bits" => {
+                        // Bit `bit` of the argument's canonical representative.
+                        let index = bit.ok_or_else(|| {
+                            format!("bits hint '{name}' is missing its bit index")
+                        })?;
+                        let canonical: u128 = arg(0).to_decimal().parse().map_err(|_| {
+                            format!("bits hint '{name}' argument does not fit a 128-bit decomposition")
+                        })?;
+                        F::from_u64(((canonical >> index) & 1) as u64)
+                    }
+                    other => return Err(format!("unknown hint kind '{other}'")),
                 },
             },
         };

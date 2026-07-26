@@ -43,22 +43,24 @@ bits of the challenge" is a *range* property (it requires `high` to be the true
 quotient, i.e. `high < p / domain`), and range properties are exactly what a
 purely determinacy-based check does not see.
 
-## The missing primitive
+## The missing primitive — now provided
 
-Soundness needs `high` range-checked, which needs the challenge fully
-decomposed into bits — and the language has no way to introduce those bits. Its
-only advice is `inv` / `inv_or_zero`; `assert_range4` already notes in passing
-that "a general 2^n range needs bit decomposition, which needs a decomposition
-hint the language does not yet provide."
+Soundness needs `high` range-checked, which needs the challenge decomposed into
+bits — and until phase 7 the language had no way to introduce those bits. It now
+does: the **`bits` decomposition hint** (see `docs/bits-hint.md`). Writing
 
-So the next primitive is a **decomposition hint** — an advice form
-`bits(x, n)` that supplies the `n` low bits of `x`, alongside the constraints
-that each is a bit and that they reconstruct `x`. With it, `high` (and the
-index) can be range-checked, and the in-circuit index derivation becomes sound.
+    advice (h0, h1, .., h61) = bits(high);
 
-One caveat carries over from phase 3: the determinacy of a bit decomposition is
-not settled by the decidable core — it is one of the cases (with `is_equal`)
-that needs the SMT-backed checker. So the decomposition hint and the SMT escape
-hatch are the two pieces that, together, would let the verifier derive its query
-index in-circuit and be both determinate and sound. Until then, the index stays
-an input, and this note marks the reason.
+supplies `high`'s bits and emits the constraints that pin them, forcing
+`high` into `[0, 2^62)` — a genuine range check, which the `closeBits`
+determinacy rule proves determinate without SMT even at that width. So the
+range check the index binding needs is now expressible and provable.
+
+One subtlety remains before the in-circuit index is *fully* sound over the
+field. Range-checking `high` to `[0, 2^62)` and `index` to `[0, 4)` bounds
+`index + 4*high` to `[0, 2^64)`, but the field wraps at `p ≈ 2^64 - 2^32`, so a
+second decomposition of `challenge + p` can exist for small challenges. Ruling
+it out needs the canonical check `challenge < p` — itself a `bits`-based
+comparison against the modulus. That is now writable too; wiring the whole
+sound derivation into the verifier is the remaining step, and it no longer waits
+on a missing primitive.

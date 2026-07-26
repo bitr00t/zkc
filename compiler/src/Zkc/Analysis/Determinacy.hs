@@ -111,7 +111,7 @@ checkDeterminacy modulus ir = do
   let equations =
         [ sub modulus (wirePolys Map.! aLhs a) (wirePolys Map.! aRhs a)
         | a <- irAssertions ir ]
-      determined = Set.fromList
+      determined = closeBits modulus (irNodes ir) wirePolys $ Set.fromList
         [ iiWire i | i <- irInputs ir, iiVisibility i /= Output ]
       targets = [ iiWire i | i <- irInputs ir, iiVisibility i == Output ]
   case targets of
@@ -292,13 +292,14 @@ proveBody modulus summaries body = do
   let equations =
         [ sub modulus (wirePolys Map.! aLhs a) (wirePolys Map.! aRhs a)
         | a <- bodyAsserts body ]
-      remaining = [ t | t <- bodyResultTargets body, not (targetKnown wirePolys determined1 Set.empty t) ]
+      determined2 = closeBits modulus (bodyNodes body) wirePolys determined1
+      remaining = [ t | t <- bodyResultTargets body, not (targetKnown wirePolys determined2 Set.empty t) ]
       advice = [ nWire n | n <- bodyNodes body, isHint (nOp n) ]
   ownBranches <-
     if null remaining
       then Right [[]]
-      else searchWith modulus advice wirePolys determined1 nonzero1 (bodyResultTargets body)
-             maxSplitDepth (rootBranch determined1 nonzero1 equations)
+      else searchWith modulus advice wirePolys determined2 nonzero1 (bodyResultTargets body)
+             maxSplitDepth (rootBranch determined2 nonzero1 equations)
   Right (combine instanceBranches ownBranches, nonzero1)
   where
     atomWires = Set.fromList
@@ -514,6 +515,26 @@ targetKnown wirePolys determined zeroed t =
     Just poly ->
       let specialised = foldr substituteZero poly (Set.toList zeroed)
       in atoms specialised `Set.isSubsetOf` determined
+
+-- | Close a determined set under bit decomposition. A @bits(x)@ node produces
+-- advice wires that the general linear/case-split rules cannot pin — its
+-- reconstruction equation has one equation in many unknowns. But the bits ARE
+-- determined: the emitted constraints force each into @{0,1}@ and their
+-- weighted sum to equal @x@, and binary decomposition is injective on
+-- @[0, 2^n)@, so the bits are exactly the low bits of @x@. This rule certifies
+-- that: once a bits node's source is determined, so are its bits. (Iterated to
+-- a fixpoint, so bits feeding other bits' sources resolve in turn.)
+closeBits :: Integer -> [Node] -> Map.Map WireId Poly -> Set.Set WireId -> Set.Set WireId
+closeBits _ nodes wirePolys = fixpoint
+  where
+    bitsPairs =
+      [ (nWire n, src)
+      | n <- nodes, OHint info args <- [nOp n], KBits _ <- [hiKind info], [src] <- [args] ]
+    fixpoint d =
+      let d' = foldl step d bitsPairs
+          step acc (bw, src) =
+            if targetKnown wirePolys acc Set.empty src then Set.insert bw acc else acc
+      in if Set.size d' == Set.size d then d else fixpoint d'
 
 saturate :: Integer -> Branch -> Branch
 saturate modulus branch =

@@ -236,6 +236,21 @@ pStmts tokens = case tokens of
     (more, t4) <- pStmts t3
     Right (stmt : more, t4)
 
+  (Token TAdvice line col : Token TLParen _ _ : afterParen) -> do
+    (names, t1) <- pNames afterParen
+    ((), t2) <- expect TEq "after the advice bit names" t1
+    t3 <- case t2 of
+      (Token (TIdent "bits") _ _ : r) -> Right r
+      (Token got l c : _) -> Left $ diagAtCol l c $
+        "the right-hand side of a tuple 'advice' must be 'bits(..)', found " ++ describeTok got
+      [] -> Left $ diag "unexpected end of input in advice binding"
+    ((), t4) <- expect TLParen "after 'bits'" t3
+    (src, t5) <- pExpr t4
+    ((), t6) <- expect TRParen "to close the bits argument" t5
+    ((), t7) <- expect TSemi "after the advice binding" t6
+    (more, t8) <- pStmts t7
+    Right (desugarBits names src line col ++ more, t8)
+
   (Token TAdvice line _ : rest) -> do
     ((name, _), t1) <- pIdent "an advice name" rest
     ((), t2) <- expect TEq "after the advice name" t1
@@ -350,3 +365,23 @@ pFactor tokens = case tokens of
   (Token got line col : _) ->
     Left $ diagAtCol line col ("expected an expression, found " ++ describeTok got)
   [] -> Left $ diag "unexpected end of input in expression"
+-- | Desugar @advice (b0, .., bk) = bits(src);@ into primitive statements: one
+-- single-bit advice per name, a bit constraint @b_i * (1 - b_i) == 0@ for each,
+-- and the reconstruction @src == b0 + 2*b1 + .. + 2^k*bk@. The reconstruction
+-- is what pins the bits to @src@ (and range-limits @src@ to @[0, 2^(k+1))@); the
+-- determinacy pass reads it to prove the bits determined.
+desugarBits :: [String] -> Expr -> Int -> Int -> [Stmt]
+desugarBits names src line col = advices ++ bitConstraints ++ [reconstruction]
+  where
+    indexed = zip [0 :: Integer ..] names
+    bitVar n = EVar n line
+    advices = [ SAdvice n (HintBit src (fromIntegral i)) line | (i, n) <- indexed ]
+    bitConstraints =
+      [ SAssert (EMul (bitVar n) (ESub (ELit 1 line) (bitVar n) line) line)
+                (ELit 0 line) line col
+      | n <- names ]
+    terms = [ EMul (bitVar n) (ELit (2 ^ i) line) line | (i, n) <- indexed ]
+    recon = case terms of
+              [] -> ELit 0 line
+              _  -> foldr1 (\a b -> EAdd a b line) terms
+    reconstruction = SAssert src recon line col

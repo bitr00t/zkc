@@ -81,8 +81,9 @@ opFields op = case op of
   ONeg a   -> [("op", str "neg"), ("args", array [number a])]
   OHint info args ->
     [ ("op", str "hint")
-    , ("hint", str (case hiKind info of KInvOrZero -> "inv_or_zero"; KInv -> "inv"))
-    , ("name", str (hiName info))
+    , ("hint", str (case hiKind info of KInvOrZero -> "inv_or_zero"; KInv -> "inv"; KBits _ -> "bits"))
+    ] ++ (case hiKind info of KBits i -> [("bit", number i)]; _ -> []) ++
+    [ ("name", str (hiName info))
     , ("gadget", str (hiGadget info))
     , ("line", number (hiLine info))
     , ("args", array (map number args))

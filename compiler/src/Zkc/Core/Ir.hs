@@ -50,7 +50,7 @@ data IrInput = IrInput
   , iiCol :: Int           -- ^ column of the declaration (0 = unknown) (J.2)
   } deriving (Eq, Show)
 
-data HintKind = KInvOrZero | KInv
+data HintKind = KInvOrZero | KInv | KBits Int
   deriving (Eq, Ord, Show)
 
 -- | Everything a hint node carries besides its arguments.
