@@ -1,49 +1,47 @@
-# zkc — Phase 7, N.2 (per-rule faithfulness of the lowering, proved not sampled)
+# zkc — Phase 7, N.3 (a mutation harness: proof the checker has teeth)
 
-The second increment of Workstream N. Where N.1 gave the IR an executable
-meaning and checked both lowerings against it on witnesses, N.2 proves the
-lowering *rules*: for each IR operation, the constraints and rows the lowering
-emits accept an assignment exactly when the operation's defining relation holds
-— for every field element, not a sampled few.
+The third and final increment of Workstream N. N.1 gave the IR an executable
+meaning; N.2 proved the lowering rules faithful to it, exhaustively over a tiny
+field. N.3 proves the *check itself* is not vacuous: it deliberately breaks each
+lowering rule and confirms the N.1/N.2 verification catches the break.
 
-**Prerequisite:** builds on N.1 (`Ir::is_satisfied` / `Ir::unmet`). Apply
-`zkc_phase7_n1.zip` first.
+**Prerequisite:** builds on N.2 — this file *supersedes* the N.2 drop's
+`backend/zkc-core/tests/lowering_faithfulness_tests.rs` (it adds the N.3 section
+below the N.2 proofs). Apply `zkc_phase7_n1.zip` and `zkc_phase7_n2.zip` first.
 
-## What it proves, and how
-The proof is by exhaustion over a tiny field, F_13. Each rule's defining
-relation and the polynomials the lowering emits for it have total degree at most
-two; a degree-`d` polynomial identity that holds on every point of a field with
-more than `d` elements is the zero polynomial, so agreement across all of F_13
-(13 > 2) is a *proof* the identity holds over any field, not a sample. This is
-the Schwartz–Zippel fact the subject rests on, turned on the compiler.
+## The argument, made concrete
+N.2 established that the real lowering agrees with the spec on every assignment.
+It follows that *any* corruption of the lowering that changes its behaviour must
+disagree with the spec somewhere — so the check would catch it. N.3 turns that
+into a live, self-checking property rather than a paper argument.
 
-For each operation the test builds the smallest circuit isolating it — the op
-feeding one assertion against a prover-chosen output — instantiates the *real*
-lowering over F_13 (everything downstream is generic over `ZkField`), and
-enumerates every assignment of the free wires. At each point three things must
-hold: the IR spec, the R1CS lowering, and the Plonkish lowering all agree, and
-their shared verdict equals `out == op(args)` computed independently. Because the
-output ranges over the whole field, the forgery direction (`out ≠ op(args)`) is
-covered as thoroughly as the honest one — the rule is pinned from both sides,
-and in both fusion modes.
+The harness generates labelled corruptions of each lowered rule — drop / neutralise
+a constraint, shift a constraint by a constant, perturb a coefficient, bump or
+flip a gate selector, and route a bogus copy constraint — and, over all of F_13,
+asserts the **anti-vacuity invariant**: every mutation that changes behaviour
+(differs from the honest lowering) is caught by the spec, and at least one such
+mutation exists per rule, so the check never passes on nothing. Named tests pin
+the design's examples directly: dropping the constraint admits a forgery the spec
+rejects; flipping the product selector diverges from the spec; a bogus copy
+rejects honest witnesses. A baseline test confirms the unmutated lowering is
+never flagged (no false positives).
 
-Rules covered: `const`, `add`, `sub`, `mul`, `neg`, and the equality assertion.
-A `the_check_sees_both_acceptance_and_rejection` test guards against a vacuous
-pass by confirming both verdicts actually occur.
+This is a lasting regression guard: weaken the spec or the check later and a
+previously-caught mutation would survive, breaking N.3.
 
 ## Build / test
     cd backend && cargo test -p zkc-core --test lowering_faithfulness_tests
-    # 7 tests, all green
+    # 12 tests (7 from N.2, 5 from N.3), all green
 
 ## Notes
-- **No production code changes.** N.2 is a verification workstream: it proves the
-  *existing* lowering faithful, adding only a proof (one new test file). The IR,
-  both lowerings, the witness solver, and the determinacy analysis are untouched.
-- The tiny field `Fp<P>` lives in the test and implements `ZkField`, so the real
-  `lower_with` / `lower_plonkish_with` run over it unchanged — the thing verified
-  is the shipping lowering, not a model of it.
+- **No production code changes.** Like N.2, N.3 adds only tests; it corrupts
+  *clones* of the lowered structures (all `Clone`, all public) and never touches
+  the shipping lowering.
+- One subtlety handled: dropping a Plonkish row is done by neutralising its gate
+  (zeroing the selectors), not removing it, so the copy and public-cell indices
+  that reference rows by position stay valid.
+- With N.3, **workstream N (formal verification of the lowering) is complete.**
+  Phase 7's remaining half is O — a verifier expressed in the language, and the
+  first recursion.
 - Local-only `backend/Cargo.lock` pins remain required (never commit): `zeroize
   1.8.1`, `zeroize_derive 1.4.2`, `rayon 1.7.0`, `rayon-core 1.12.1`.
-- Next: N.3 (a mutation harness that corrupts each rule and confirms this check
-  catches it — evidence the specification can fail), then O (a verifier in the
-  language, and recursion).

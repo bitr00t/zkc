@@ -28,7 +28,8 @@ use std::collections::HashMap;
 use zkc_core::field::ZkField;
 use zkc_core::ir::Ir;
 use zkc_core::lower::lower_with;
-use zkc_core::plonkish::lower_plonkish_with;
+use zkc_core::plonkish::{lower_plonkish_with, Cell, Column, Plonkish};
+use zkc_core::r1cs::R1cs;
 use zkc_core::witness::{solve, SolveInputs};
 
 // --- A tiny field, small enough to exhaust -------------------------------
@@ -266,4 +267,211 @@ fn the_check_sees_both_acceptance_and_rejection() {
     }
     assert_eq!(accepted, P as u32 * P as u32, "one satisfying out per (a, b)");
     assert!(rejected > 0, "the forgery direction must be exercised");
+}
+
+// --- Phase 7, N.3: a mutation harness — proof the checker has teeth ------
+//
+// N.2 proved the real lowering agrees with the spec everywhere. It follows that
+// *any* corruption of the lowering that changes its behaviour must disagree
+// with the spec somewhere — so N.1/N.2's check would catch it. N.3 makes that
+// argument concrete and keeps it honest: it deliberately breaks each rule and
+// confirms the check flags the break. The invariant asserted is the anti-vacuity
+// property — every mutation that changes behaviour (differs from the honest
+// lowering) is caught by the spec — plus the demand that real, behaviour-changing
+// mutations actually exist, so the check is never passing on nothing.
+
+/// Every consistent full-wire assignment for a fixture (inputs enumerated over
+/// F_13, intermediates solved).
+fn all_assignments(ir: &Ir) -> Vec<Vec<F>> {
+    let input_names: Vec<String> = ir.inputs.iter().map(|i| i.name.clone()).collect();
+    let k = input_names.len() as u32;
+    (0..P.pow(k))
+        .map(|code| {
+            let mut rest = code;
+            let mut env = std::collections::HashMap::new();
+            for name in &input_names {
+                env.insert(name.clone(), F::from_u64(rest % P));
+                rest /= P;
+            }
+            solve::<F>(ir, &SolveInputs { inputs: &env, advice_overrides: &HashMap::new() }).unwrap()
+        })
+        .collect()
+}
+
+fn r1cs_verdicts(r: &R1cs<F>, asg: &[Vec<F>]) -> Vec<bool> {
+    asg.iter().map(|w| r.is_satisfied(&r.assignment(w))).collect()
+}
+fn plonk_verdicts(p: &Plonkish<F>, asg: &[Vec<F>]) -> Vec<bool> {
+    asg.iter().map(|w| p.is_satisfied(&p.assignment(w))).collect()
+}
+fn spec_verdicts(ir: &Ir, asg: &[Vec<F>]) -> Vec<bool> {
+    asg.iter().map(|w| ir.is_satisfied::<F>(w)).collect()
+}
+
+/// Labelled corruptions of a lowered R1CS: drop a constraint, shift one by a
+/// constant, and perturb a coefficient.
+fn r1cs_mutants(base: &R1cs<F>) -> Vec<(String, R1cs<F>)> {
+    let mut out = Vec::new();
+    for i in 0..base.constraints.len() {
+        let mut drop = base.clone();
+        drop.constraints.remove(i);
+        out.push((format!("drop R1CS constraint {i}"), drop));
+
+        let mut shift = base.clone();
+        shift.constraints[i].c.terms.push((0, F::one())); // + 1·(const-one)
+        out.push((format!("shift R1CS constraint {i} by 1"), shift));
+
+        if let Some(term) = base.constraints[i].c.terms.first() {
+            let mut bump = base.clone();
+            bump.constraints[i].c.terms[0] = (term.0, term.1.add(F::one()));
+            out.push((format!("perturb a coefficient of R1CS constraint {i}"), bump));
+        }
+    }
+    out
+}
+
+/// Labelled corruptions of a lowered Plonkish system: drop a row, flip or bump
+/// a selector, and route a bogus copy constraint.
+fn plonkish_mutants(base: &Plonkish<F>) -> Vec<(String, Plonkish<F>)> {
+    let mut out = Vec::new();
+    for i in 0..base.rows.len() {
+        // Neutralise the gate (all selectors zero ⇒ 0 == 0, always satisfied)
+        // rather than removing the row, so the copy and public-cell indices that
+        // reference rows by position stay valid. The effect is the same: the
+        // constraint this row carried is gone.
+        let mut drop = base.clone();
+        let r = &mut drop.rows[i];
+        r.q_l = F::zero();
+        r.q_r = F::zero();
+        r.q_o = F::zero();
+        r.q_m = F::zero();
+        r.q_c = F::zero();
+        out.push((format!("neutralise Plonkish row {i}'s gate"), drop));
+
+        for (name, sel) in [("output", 2u8), ("product", 3), ("constant", 4)] {
+            let mut m = base.clone();
+            let r = &mut m.rows[i];
+            match sel {
+                2 => r.q_o = r.q_o.add(F::one()),
+                3 => r.q_m = r.q_m.add(F::one()),
+                _ => r.q_c = r.q_c.add(F::one()),
+            }
+            out.push((format!("bump row {i} {name} selector"), m));
+        }
+    }
+    // A misrouted/bogus copy: demand two cells of the first row agree. Where
+    // they hold different wires this rejects honest witnesses; where they don't
+    // it is a no-op — either way the anti-vacuity invariant must hold.
+    if !base.rows.is_empty() {
+        let mut m = base.clone();
+        m.copies.push((
+            Cell { row: 0, column: Column::A },
+            Cell { row: 0, column: Column::B },
+        ));
+        out.push(("route a bogus copy constraint".to_string(), m));
+    }
+    out
+}
+
+/// The core N.3 invariant, per fixture: every behaviour-changing mutation is
+/// caught by the spec, and at least one such mutation exists.
+fn assert_check_has_teeth(fixture: &str) {
+    let ir = Ir::from_json(fixture).unwrap();
+    let asg = all_assignments(&ir);
+    let spec = spec_verdicts(&ir, &asg);
+
+    let r1cs = lower_with::<F>(&ir, false).unwrap();
+    let plonk = lower_plonkish_with::<F>(&ir, false).unwrap();
+    let r1cs_honest = r1cs_verdicts(&r1cs, &asg);
+    let plonk_honest = plonk_verdicts(&plonk, &asg);
+
+    let mut caught = 0;
+
+    for (label, m) in r1cs_mutants(&r1cs) {
+        let v = r1cs_verdicts(&m, &asg);
+        let differs = v.iter().zip(&r1cs_honest).any(|(a, b)| a != b);
+        let flagged = v.iter().zip(&spec).any(|(a, b)| a != b);
+        assert_eq!(differs, flagged, "{}: '{label}' changed behaviour without being caught", ir.name);
+        caught += flagged as usize;
+    }
+    for (label, m) in plonkish_mutants(&plonk) {
+        let v = plonk_verdicts(&m, &asg);
+        let differs = v.iter().zip(&plonk_honest).any(|(a, b)| a != b);
+        let flagged = v.iter().zip(&spec).any(|(a, b)| a != b);
+        assert_eq!(differs, flagged, "{}: '{label}' changed behaviour without being caught", ir.name);
+        caught += flagged as usize;
+    }
+
+    assert!(caught > 0, "{}: no mutation was caught — the check is toothless here", ir.name);
+}
+
+#[test]
+fn mutation_harness_catches_every_behaviour_changing_lowering() {
+    for fixture in [MUL_RULE, ADD_RULE, SUB_RULE, NEG_RULE, CONST_RULE, ASSERT_RULE] {
+        assert_check_has_teeth(fixture);
+    }
+}
+
+#[test]
+fn dropping_a_constraint_admits_a_forgery_the_spec_rejects() {
+    // The named case. With the mul constraint gone, R1CS accepts every
+    // assignment; the spec still rejects those where out ≠ a·b, so they diverge.
+    let ir = Ir::from_json(MUL_RULE).unwrap();
+    let asg = all_assignments(&ir);
+    let spec = spec_verdicts(&ir, &asg);
+
+    let mut broken = lower_with::<F>(&ir, false).unwrap();
+    broken.constraints.clear();
+    let v = r1cs_verdicts(&broken, &asg);
+
+    assert!(v.iter().all(|&ok| ok), "an empty R1CS accepts everything");
+    assert!(v.iter().zip(&spec).any(|(m, s)| m != s), "the spec rejects the forgeries it now admits");
+}
+
+#[test]
+fn flipping_a_gate_selector_is_caught() {
+    // Negate the product selector on every row: the mul gate becomes -a·b, so
+    // it accepts a different relation and diverges from the spec.
+    let ir = Ir::from_json(MUL_RULE).unwrap();
+    let asg = all_assignments(&ir);
+    let spec = spec_verdicts(&ir, &asg);
+
+    let mut p = lower_plonkish_with::<F>(&ir, false).unwrap();
+    for row in p.rows.iter_mut() {
+        row.q_m = row.q_m.neg();
+    }
+    let v = plonk_verdicts(&p, &asg);
+    assert!(v.iter().zip(&spec).any(|(m, s)| m != s), "a flipped q_m must diverge from the spec");
+}
+
+#[test]
+fn a_bogus_copy_constraint_rejects_honest_witnesses_and_is_caught() {
+    // Misrouting the wiring — here, demanding two independent inputs agree —
+    // makes the lowering reject assignments the spec accepts.
+    let ir = Ir::from_json(MUL_RULE).unwrap();
+    let asg = all_assignments(&ir);
+    let spec = spec_verdicts(&ir, &asg);
+
+    let mut p = lower_plonkish_with::<F>(&ir, false).unwrap();
+    p.copies.push((
+        Cell { row: 0, column: Column::A },
+        Cell { row: 0, column: Column::B },
+    ));
+    let v = plonk_verdicts(&p, &asg);
+    assert!(v.iter().zip(&spec).any(|(m, s)| m != s), "a bogus copy must reject some honest witness");
+}
+
+#[test]
+fn the_honest_lowering_is_never_flagged() {
+    // The baseline the harness measures against: with no mutation, both
+    // lowerings agree with the spec on every assignment (no false positives).
+    for fixture in [MUL_RULE, ADD_RULE, SUB_RULE, NEG_RULE, CONST_RULE, ASSERT_RULE] {
+        let ir = Ir::from_json(fixture).unwrap();
+        let asg = all_assignments(&ir);
+        let spec = spec_verdicts(&ir, &asg);
+        let r1cs = lower_with::<F>(&ir, false).unwrap();
+        let plonk = lower_plonkish_with::<F>(&ir, false).unwrap();
+        assert_eq!(r1cs_verdicts(&r1cs, &asg), spec, "{}: R1CS baseline", ir.name);
+        assert_eq!(plonk_verdicts(&plonk, &asg), spec, "{}: Plonkish baseline", ir.name);
+    }
 }
