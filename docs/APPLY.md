@@ -1,48 +1,65 @@
-# zkc — Phase 6, K (language server + hover)
+# zkc — Phase 6, L (the constraint-count profiler)
 
-An LSP server that reuses the compiler as a library to publish determinacy
-diagnostics, plus a hover that surfaces the `--explain` proof.
+Per-source-line cost attribution: a `zkc-profile` report (text and JSON) that
+ranks source lines by the constraints and rows they produce, and, through the
+language server, an inlay hint showing each line's cost.
 
-**Prerequisite:** this builds on J.1 (JSON diagnostics, `Zkc.Json`) and J.2
-(columns, `diagCol`) from the previous drop (`zkc_phase6_j1_j2.zip`). Apply that
-first; the files below overlay cleanly on top of it (they supersede that drop's
-`Main.hs` and `tests/Spec.hs`).
+**Prerequisite:** builds on J.1/J.2 (`Zkc.Json`, columns) and K (the LSP server,
+`Zkc.Diagnose`, `Zkc.Lsp`). Apply `zkc_phase6_j1_j2.zip` and `zkc_phase6_k.zip`
+first; the files here overlay on top and supersede K's `Diagnose.hs`, `Lsp.hs`
+and `tests/Spec.hs`.
 
-## New files
-- `compiler/src/Zkc/Diagnose.hs` — the front end as a library. `diagnoseSource`
-  runs parse -> elaborate -> the *decidable* determinacy core (no solver, no
-  IO) and returns `[Diagnostic]`; the CLI and the server now share the same
-  diagnostic construction (the `determinacyDiagnostic` / `refutation` /
-  `residual` builders moved here out of `Main`). Also `hoverAt`, which reports
-  the determinacy proof for the output under the cursor.
-- `compiler/src/Zkc/Lsp.hs` — the LSP server. Speaks JSON-RPC over stdin/stdout
-  with `Content-Length` framing (UTF-8-byte-accurate, hand-rolled on the boot
-  `bytestring`). `handleMessage` is a pure `(state, request) -> (state,
-  replies)` function so the whole protocol is unit-tested without a subprocess;
-  `runLsp` is only the IO loop. Handles `initialize` (advertising full sync +
-  hover), `didOpen` / `didChange` / `didClose` (publishing diagnostics), and
-  `textDocument/hover` (the proof), plus `shutdown` / `exit`.
+## L.1 — Per-source-line attribution
+The mechanism: every R1CS constraint and every Plonkish row now carries the
+source line it came from, and cost is aggregated by line. The per-line costs sum
+to exactly the *unfused* totals `zkc-stats` already reports — the profiler is a
+view over the same measurement, not a second one.
 
-## Modified
-- `compiler/src/Main.hs` — the five diagnostic builders moved to `Zkc.Diagnose`
-  (imported back); new `zkc lsp` subcommand wired to `runLsp`; usage updated.
-  CLI behaviour is otherwise unchanged.
-- `compiler/tests/Spec.hs` — +14 checks (LSP protocol core, diagnostic->LSP
-  range mapping, UTF-8 framing, and hover surfacing the proof).
+Attribution is done on the **unfused** lowering, where each constraint and row
+maps 1:1 to the construct that produced it. Fusion is a cross-line rewrite with
+no honest per-line split, so it is deliberately not what the profile attributes.
 
-## Run / test
+- Frontend: the IR node now carries a source line (`nLine`), threaded through
+  elaboration and the optimiser and emitted in the IR JSON. Files:
+  `compiler/src/Zkc/Core/{Ir,Elaborate,Passes}.hs`, `compiler/src/Zkc/Emit/Json.hs`
+  (and a one-token pattern update in `Analysis/Determinacy.hs` and `Diagnose.hs`).
+- Backend: `Node`, R1CS `Constraint` and Plonkish `Row` gain a `line`; the
+  lowering tags mul constraints/rows with the node's line and assertion
+  constraints/rows with the assertion's line. Files:
+  `backend/zkc-core/src/{ir,r1cs,plonkish,lower}.rs` (plus `line: 0` in two
+  STARK test row-builders).
+- Aggregation: `zkc_prove::stats::profile` groups the unfused lowering by line.
+  Tested (`backend/zkc-prove/tests/profile_tests.rs`) that per-line costs sum to
+  `zkc-stats`'s unfused totals and that a multiplication is billed to its line.
+
+## L.2 — The profile report and editor integration
+- `zkc-profile` (`backend/zkc-prove/src/bin/zkc-profile.rs`): a new binary that
+  ranks source lines by cost across both arithmetizations, text or `--json`,
+  naming the hottest line. `Profile::{render_text,render_json,hottest}` live in
+  the `stats` module.
+- Inlay hints: the language server advertises `inlayHintProvider` and answers
+  `textDocument/inlayHint` with each line's cost at end of line. Because the LSP
+  is Haskell and cannot cheaply call the Rust profiler, `compiler/src/Zkc/Profile.hs`
+  reproduces the same unfused accounting on the Haskell IR (the rules are the
+  backend's, kept trivial so they cannot drift). `zkc-profile` remains canonical.
+
+## Build / test
     make -C compiler all
     cd compiler && ghc -O0 -isrc -itests -outputdir build/test-objs \
-        -o build/spec tests/Spec.hs && ./build/spec        # 121/121 green
+        -o build/spec tests/Spec.hs && ./build/spec        # 126/126 green
 
-    # start the server (an editor client speaks to it over stdin/stdout):
-    compiler/build/zkc lsp
+    cd backend && cargo test                                # all green, incl.
+    cargo build --bin zkc-profile                           #   profile_tests (4)
+    zkc build circuit.zkc -o c.ir.json && \
+      cargo run --bin zkc-profile -- c.ir.json              # per-line report
 
 ## Notes
-- The server runs only the decidable core, so it never shells out to a solver
-  and is safe to call on every keystroke. Refutation/residual (which need SMT
-  and IO) keep their diagnostic builders in `Zkc.Diagnose` for the CLI path.
-- Hover on an output shows "proved determined" with the case splits the proof
-  used (e.g. `x == 0` / `x != 0`), or, for the output the proof got stuck on,
-  why it is not determined.
-- Baseline entering K was 107/107; K -> 121/121 (+14).
+- **Never commit `backend/Cargo.lock`.** Local-only pins needed to build under
+  rustc 1.75: `zeroize 1.8.1`, `zeroize_derive 1.4.2`, and for the profiler/
+  arkworks path `rayon 1.7.0` + `rayon-core 1.12.1` (rayon-core >=1.13 needs
+  rustc 1.80).
+- Cross-checked end to end: on a circuit whose line 6 holds two muls and an
+  assertion and line 7 an add and an assertion, both `zkc-profile` and the LSP
+  inlay hints report line 6 = 3 constraints / 3 rows, line 7 = 1 / 2, totalling
+  the 4 / 5 unfused counts `zkc-stats` prints.
+- Test progression: 121 (entering L) -> 126 frontend; backend +4 profile tests.

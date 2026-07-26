@@ -23,6 +23,7 @@ import Zkc.Json (Json(..), encode, parse)
 import Zkc.Lsp
   ( ServerState(..), initialState, handleMessage, diagnosticToLsp
   , frame, utf8Length )
+import Zkc.Profile (LineCost(..), profileSource)
 import Zkc.Field (fieldModulus)
 import Zkc.Syntax.Ast
 import Zkc.Syntax.Lexer (lexer, Tok(..), Token(..))
@@ -307,6 +308,32 @@ lspOpenThenHover text line ch =
               , ("position", JObj [("line", JInt (fromIntegral line))
                                    , ("character", JInt (fromIntegral ch))]) ])
   in case snd (handleMessage st1 hoverReq) of
+       (r : _) -> encode r
+       [] -> ""
+
+-- | A circuit with a known hot line: line 6 carries two multiplications and an
+-- assertion, line 7 only an assertion.
+hotCircuit :: String
+hotCircuit = unlines
+  [ "circuit Hot {"
+  , "  public a: field;"
+  , "  public b: field;"
+  , "  output z: field;"
+  , "  output w: field;"
+  , "  assert z == a * a * a;"
+  , "  assert w == b + b;"
+  , "}"
+  ]
+
+-- | Open a document, then request inlay hints; encode the reply.
+lspOpenThenInlay :: String -> String
+lspOpenThenInlay text =
+  let uri = "file:///p.zkc"
+      (st1, _) = handleMessage initialState
+        (lspNote "textDocument/didOpen" (lspTextDoc uri text))
+      inlayReq = lspReq 8 "textDocument/inlayHint"
+        (JObj [ ("textDocument", JObj [("uri", JStr uri)]) ])
+  in case snd (handleMessage st1 inlayReq) of
        (r : _) -> encode r
        [] -> ""
 
@@ -848,6 +875,31 @@ cases =
     , let out = lspOpenThenHover isZero 7 11    -- zero-based line of 'out'
       in "\"kind\":\"markdown\"" `isInfixOf` out
          && "proved determined" `isInfixOf` out )
+
+  -- Per-source-line cost profile (phase 6, L) ---------------------------
+  , ( "profile: a multiplication and an assertion each cost one R1CS constraint"
+    , let costs = profileSource "bn254" hotCircuit
+          at l = [ c | c <- costs, lcLine c == l ]
+      in at 6 == [LineCost 6 3 3]      -- two muls + one assertion
+         && at 7 == [LineCost 7 1 2] ) -- one add (row only) + one assertion
+
+  , ( "profile: per-line R1CS cost totals one per multiplication plus assertion"
+    , let costs = profileSource "bn254" hotCircuit
+      in sum (map lcR1cs costs) == 4        -- 2 muls + 2 assertions
+         && sum (map lcPlonkish costs) == 5 ) -- 2 muls + 1 add + 2 assertions
+
+  , ( "profile: an unparseable document has no cost yet"
+    , null (profileSource "bn254" "circuit { oops") )
+
+  , ( "lsp: initialize advertises inlay hints"
+    , "\"inlayHintProvider\":true" `isInfixOf`
+        lspReply (lspReq 1 "initialize" (JObj [])) )
+
+  , ( "lsp: inlay hints report each line's cost at end of line"
+    , let out = lspOpenThenInlay hotCircuit
+      in "3 constraints, 3 rows" `isInfixOf` out
+         && "1 constraints, 2 rows" `isInfixOf` out
+         && "\"paddingLeft\":true" `isInfixOf` out )
 
   -- SMT escalation: the query, built without ever running a solver -----
   , ( "smt: the failing scope is named, so escalation asks about it alone"

@@ -83,6 +83,7 @@ data Op
 data Node = Node
   { nWire :: WireId
   , nOp :: Op
+  , nLine :: Int          -- ^ source line this node came from (0 = unknown) (L.1)
   } deriving (Eq, Show)
 
 data Assertion = Assertion

@@ -255,7 +255,7 @@ bodySystem modulus body = do
     atomName w =
       case [ iiName i | i <- bodyAtoms body, iiWire i == w ] of
         (n : _) -> n
-        [] -> case [ hiName info | Node w' (OHint info _) <- bodyNodes body, w' == w ] of
+        [] -> case [ hiName info | Node w' (OHint info _) _ <- bodyNodes body, w' == w ] of
           (n : _) -> n
           [] -> "wire" ++ show w
 

@@ -92,6 +92,9 @@ impl NodeOp {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Node {
     pub wire: u32,
+    /// Source line this node came from (0 = unknown), for cost attribution (L.1).
+    #[serde(default)]
+    pub line: u32,
     /// Whether this wire's value depends, transitively, on a hint.
     ///
     /// This is the frontend's *syntactic* taint, not a soundness verdict: a

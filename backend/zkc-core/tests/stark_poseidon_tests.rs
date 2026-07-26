@@ -82,6 +82,7 @@ fn wiring_violation_caught_under_poseidon() {
         q_l: zero, q_r: zero, q_o: zero, q_m: zero, q_c: zero,
         cells: [Some(0), None, None],
         origin: origin.to_string(),
+        line: 0,
     };
     let circuit = Plonkish {
         rows: vec![row("wire cell A"), row("wire cell B")],

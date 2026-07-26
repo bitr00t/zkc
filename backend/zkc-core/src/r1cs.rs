@@ -74,6 +74,8 @@ pub struct Constraint<F> {
     pub c: Lc<F>,
     /// Where this constraint came from, in the user's own words.
     pub origin: String,
+    /// Source line this constraint is attributed to (0 = unknown) (L.1).
+    pub line: u32,
 }
 
 #[derive(Debug, Clone)]

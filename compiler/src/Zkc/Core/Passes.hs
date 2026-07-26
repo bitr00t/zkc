@@ -67,15 +67,15 @@ optimize ir = (renumber ir', stats)
       }
 
 step :: Acc -> Node -> Acc
-step acc (Node oldWire op0) =
+step acc (Node oldWire op0 line) =
   let op = mapArgs (\w -> Map.findWithDefault w w (accSubst acc)) op0
   in case constFold acc op of
-       Just value -> emitConst acc oldWire value
+       Just value -> emitConst acc oldWire value line
        Nothing -> case Map.lookup op (accMemo acc) of
          Just existing | not (isHint op) ->
            acc { accSubst = Map.insert oldWire existing (accSubst acc)
                , accShared = accShared acc + 1 }
-         _ -> emitNode acc oldWire op
+         _ -> emitNode acc oldWire op line
 
 mapArgs :: (WireId -> WireId) -> Op -> Op
 mapArgs f op = case op of
@@ -98,8 +98,8 @@ constFold acc op = case op of
   where
     known w = Map.lookup w (accConsts acc)
 
-emitConst :: Acc -> WireId -> Integer -> Acc
-emitConst acc oldWire value =
+emitConst :: Acc -> WireId -> Integer -> Int -> Acc
+emitConst acc oldWire value line =
   case Map.lookup (OConst value) (accMemo acc) of
     Just existing ->
       acc { accSubst = Map.insert oldWire existing (accSubst acc)
@@ -110,16 +110,16 @@ emitConst acc oldWire value =
              , accSubst = Map.insert oldWire wire (accSubst acc)
              , accMemo = Map.insert (OConst value) wire (accMemo acc)
              , accConsts = Map.insert wire value (accConsts acc)
-             , accNodes = Node wire (OConst value) : accNodes acc
+             , accNodes = Node wire (OConst value) line : accNodes acc
              , accFolded = accFolded acc + 1 }
 
-emitNode :: Acc -> WireId -> Op -> Acc
-emitNode acc oldWire op =
+emitNode :: Acc -> WireId -> Op -> Int -> Acc
+emitNode acc oldWire op line =
   let wire = accNext acc
   in acc { accNext = wire + 1
          , accSubst = Map.insert oldWire wire (accSubst acc)
          , accMemo = Map.insert op wire (accMemo acc)
-         , accNodes = Node wire op : accNodes acc }
+         , accNodes = Node wire op line : accNodes acc }
 
 -- | Keep only nodes some assertion transitively depends on.
 eliminateDead :: [Node] -> [Assertion] -> ([Node], Int)
@@ -147,5 +147,5 @@ renumber ir = ir { irNodes = newNodes, irAssertions = newAsserts }
       ++ [ (iiWire i, iiWire i) | i <- irInputs ir ]
       ++ zip (map nWire (irNodes ir)) [base ..]
     fix w = Map.findWithDefault w w remap
-    newNodes = [ Node (fix (nWire n)) (mapArgs fix (nOp n)) | n <- irNodes ir ]
+    newNodes = [ Node (fix (nWire n)) (mapArgs fix (nOp n)) (nLine n) | n <- irNodes ir ]
     newAsserts = [ a { aLhs = fix (aLhs a), aRhs = fix (aRhs a) } | a <- irAssertions ir ]

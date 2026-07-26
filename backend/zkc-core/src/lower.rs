@@ -93,6 +93,7 @@ pub fn lower_with<F: ZkField>(ir: &Ir, fuse: bool) -> Result<R1cs<F>, String> {
                     b: arg(1, &lcs),
                     c: Lc::var(var),
                     origin: format!("multiplication at wire {}", node.wire),
+                    line: node.line,
                 });
                 Lc::var(var)
             }
@@ -118,6 +119,7 @@ pub fn lower_with<F: ZkField>(ir: &Ir, fuse: bool) -> Result<R1cs<F>, String> {
                     b: lcs[arg1 as usize].clone(),
                     c: lcs[other_wire as usize].clone(),
                     origin: format!("line {}: {}", assertion.line, assertion.label),
+                    line: assertion.line,
                 });
             }
             // No fusion: the honest `(l - r) * 1 = 0`.
@@ -128,6 +130,7 @@ pub fn lower_with<F: ZkField>(ir: &Ir, fuse: bool) -> Result<R1cs<F>, String> {
                     b: Lc::constant(F::one()),
                     c: Lc::zero(),
                     origin: format!("line {}: {}", assertion.line, assertion.label),
+                    line: assertion.line,
                 });
             }
         }

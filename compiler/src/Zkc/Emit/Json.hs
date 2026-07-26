@@ -60,10 +60,17 @@ visibilityName v = case v of
   Output -> "output"
 
 nodeJson :: Set.Set WireId -> Node -> String
-nodeJson tainted (Node wire op) = object $
-  ("wire", number wire)
-  : ("advice_derived", bool (wire `Set.member` tainted))
-  : opFields op
+nodeJson tainted (Node wire op line) = object $
+  [ ("wire", number wire)
+  , ("advice_derived", bool (wire `Set.member` tainted)) ]
+  ++ lineField
+  ++ opFields op
+  where
+    -- A hint already carries its line inside its own fields; every other node
+    -- gets a top-level source line so the profiler can attribute its cost (L.1).
+    lineField = case op of
+      OHint _ _ -> []
+      _         -> [("line", number line)]
 
 opFields :: Op -> [(String, String)]
 opFields op = case op of

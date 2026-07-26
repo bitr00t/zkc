@@ -111,6 +111,8 @@ pub struct Row<F> {
     pub cells: [Option<u32>; 3],
     /// Where this row came from, in the user's own words.
     pub origin: String,
+    /// Source line this row is attributed to (0 = unknown) (L.1).
+    pub line: u32,
 }
 
 impl<F: ZkField> Row<F> {
@@ -123,6 +125,7 @@ impl<F: ZkField> Row<F> {
             q_c: F::zero(),
             cells: [None, None, None],
             origin,
+            line: 0,
         }
     }
 
@@ -444,6 +447,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
             NodeOp::Const { value } => {
                 // c = value, i.e. c - value = 0.
                 let mut row = Row::empty(format!("const at wire {}", node.wire));
+                row.line = node.line;
                 row.q_o = one;
                 row.q_c = F::from_decimal(value)?.neg();
                 row.cells[Column::C.index()] = Some(node.wire);
@@ -452,6 +456,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
 
             NodeOp::Add { args } => {
                 let mut row = Row::empty(format!("add at wire {}", node.wire));
+                row.line = node.line;
                 row.q_l = one;
                 row.q_r = one;
                 row.q_o = minus_one;
@@ -461,6 +466,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
 
             NodeOp::Sub { args } => {
                 let mut row = Row::empty(format!("sub at wire {}", node.wire));
+                row.line = node.line;
                 row.q_l = one;
                 row.q_r = minus_one;
                 row.q_o = minus_one;
@@ -470,6 +476,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
 
             NodeOp::Mul { args } => {
                 let mut row = Row::empty(format!("mul at wire {}", node.wire));
+                row.line = node.line;
                 row.q_m = one;
                 row.q_o = minus_one;
                 row.cells = [Some(args[0]), Some(args[1]), Some(node.wire)];
@@ -478,6 +485,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
 
             NodeOp::Neg { args } => {
                 let mut row = Row::empty(format!("neg at wire {}", node.wire));
+                row.line = node.line;
                 row.q_l = minus_one;
                 row.q_o = minus_one;
                 row.cells = [Some(args[0]), None, Some(node.wire)];
@@ -489,6 +497,7 @@ fn lower_unfused<F: ZkField>(ir: &Ir) -> Result<Plonkish<F>, String> {
     for assertion in &ir.assertions {
         // lhs - rhs = 0. The `c` cell stays empty, and q_O is zero with it.
         let mut row = Row::empty(format!("line {}: {}", assertion.line, assertion.label));
+        row.line = assertion.line;
         row.q_l = one;
         row.q_r = minus_one;
         row.cells = [Some(assertion.lhs), Some(assertion.rhs), None];

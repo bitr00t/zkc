@@ -36,6 +36,7 @@ import qualified Data.ByteString as BS
 import Zkc.Diagnose (diagnoseSource, hoverAt)
 import Zkc.Diagnostics
 import Zkc.Json (Json(..), encode, parse)
+import Zkc.Profile (LineCost(..), profileSource)
 
 -- | Everything the server remembers between messages: the open documents by
 -- URI, and the field the analysis runs over.
@@ -104,7 +105,8 @@ initializeResult :: Json
 initializeResult = JObj
   [ ("capabilities", JObj
       [ ("textDocumentSync", JInt 1)      -- 1 = full
-      , ("hoverProvider", JBool True) ])
+      , ("hoverProvider", JBool True)
+      , ("inlayHintProvider", JBool True) ])
   , ("serverInfo", JObj [("name", JStr "zkc-lsp")]) ]
 
 -- Diagnostics ----------------------------------------------------------
@@ -171,6 +173,7 @@ handleMessage st msg =
         Just uri -> (st { stDocs = Map.delete uri (stDocs st) }, [publishEmpty uri])
         Nothing -> (st, [])
     Just "textDocument/hover" -> (st, [response mid (hoverResult st params)])
+    Just "textDocument/inlayHint" -> (st, [response mid (inlayHints st params)])
     Just "shutdown" -> (st, [response mid JNull])
     Just "exit" -> (st, [])
     Just _ -> case mid of
@@ -196,6 +199,29 @@ hoverResult st params = case jstr ["textDocument", "uri"] params of
            Just markdown -> JObj
              [ ("contents", JObj
                  [ ("kind", JStr "markdown"), ("value", JStr markdown) ]) ]
+
+-- | Inlay hints: each source line's cost, mirroring @zkc-profile@, placed at
+-- the end of the line. The backend profiler's numbers are canonical; this
+-- surfaces the same unfused accounting inline while editing.
+inlayHints :: ServerState -> Json -> Json
+inlayHints st params = case jstr ["textDocument", "uri"] params of
+  Nothing -> JArr []
+  Just uri -> case Map.lookup uri (stDocs st) of
+    Nothing -> JArr []
+    Just text -> JArr (map (hint text) (profileSource (stField st) text))
+  where
+    hint text (LineCost line r p) = JObj
+      [ ("position", JObj
+          [ ("line", JInt (fromIntegral (line - 1)))
+          , ("character", JInt (fromIntegral (lineLength text line))) ])
+      , ("label", JStr (" " ++ show r ++ " constraints, " ++ show p ++ " rows"))
+      , ("paddingLeft", JBool True) ]
+
+-- | Character length of a 1-based source line (0 if out of range).
+lineLength :: String -> Int -> Int
+lineLength text n =
+  let ls = lines text
+  in if n >= 1 && n <= length ls then length (ls !! (n - 1)) else 0
 
 -- Framing (Content-Length over UTF-8) ----------------------------------
 

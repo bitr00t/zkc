@@ -149,6 +149,7 @@ fn a_wiring_violation_is_caught_by_the_permutation_argument() {
         q_l: zero, q_r: zero, q_o: zero, q_m: zero, q_c: zero,
         cells: [Some(0), None, None],
         origin: origin.to_string(),
+        line: 0,
     };
     let (row0, row1) = (row("wire cell A"), row("wire cell B"));
     let circuit = Plonkish {

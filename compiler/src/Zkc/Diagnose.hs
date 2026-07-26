@@ -124,7 +124,7 @@ nameInBody :: Body -> WireId -> String
 nameInBody body wire =
   case [ iiName i | i <- bodyAtoms body, iiWire i == wire ] of
     (name : _) -> name
-    [] -> case [ hiName info | Node w (OHint info _) <- bodyNodes body, w == wire ] of
+    [] -> case [ hiName info | Node w (OHint info _) _ <- bodyNodes body, w == wire ] of
       (name : _) -> name
       [] -> "wire" ++ show wire
 

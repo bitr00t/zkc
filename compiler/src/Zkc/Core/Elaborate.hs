@@ -219,7 +219,7 @@ goStmt gadgetMap enclosing st stmt = case stmt of
       (argWire, st1) <- goExpr st argExpr
       let wire = stNext st1
           info = HintInfo kindTag name gadgetName line
-          node = Node wire (OHint info [argWire])
+          node = Node wire (OHint info [argWire]) (hiLine info)
       Right st1 { stNext = wire + 1
                 , stFlatNodes = node : stFlatNodes st1
                 , stOwnNodes = node : stOwnNodes st1
@@ -340,26 +340,26 @@ ensureFree st name line
 -- own list), returning the wire holding its value.
 goExpr :: St -> Expr -> Either Diagnostic (WireId, St)
 goExpr st expr = case expr of
-  ELit n _ -> Right (emit st (OConst n))
+  ELit n line -> Right (emit st line (OConst n))
   EVar name line -> case Map.lookup name (stEnv st) of
     Just wire -> Right (wire, st)
     Nothing -> Left $ diagAt line ("'" ++ name ++ "' is not defined")
-  EAdd a b _ -> binary st OAdd a b
-  ESub a b _ -> binary st OSub a b
-  EMul a b _ -> binary st OMul a b
-  ENeg a _ -> do
+  EAdd a b line -> binary st line OAdd a b
+  ESub a b line -> binary st line OSub a b
+  EMul a b line -> binary st line OMul a b
+  ENeg a line -> do
     (w, st1) <- goExpr st a
-    Right (emit st1 (ONeg w))
+    Right (emit st1 line (ONeg w))
   where
-    binary s make lhs rhs = do
+    binary s line make lhs rhs = do
       (lw, s1) <- goExpr s lhs
       (rw, s2) <- goExpr s1 rhs
-      Right (emit s2 (make lw rw))
+      Right (emit s2 line (make lw rw))
 
-emit :: St -> Op -> (WireId, St)
-emit st op =
+emit :: St -> Int -> Op -> (WireId, St)
+emit st line op =
   let wire = stNext st
-      node = Node wire op
+      node = Node wire op line
   in (wire, st { stNext = wire + 1
                , stFlatNodes = node : stFlatNodes st
                , stOwnNodes = node : stOwnNodes st })
@@ -449,7 +449,7 @@ goSkelStmt gadgetMap def st stmt = case stmt of
     (argWire, st1) <- goExpr st argExpr
     let wire = stNext st1
         info = HintInfo kindTag name (gdName def) line
-        node = Node wire (OHint info [argWire])
+        node = Node wire (OHint info [argWire]) (hiLine info)
     Right st1 { stNext = wire + 1
               , stOwnNodes = node : stOwnNodes st1
               , stEnv = Map.insert name wire (stEnv st1) }
