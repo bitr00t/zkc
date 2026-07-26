@@ -18,8 +18,8 @@ Two invariants hold at every phase:
 | 3     | Real IR and optimization: gadgets as parameterised definitions, constraint-count optimization, SMT escalation when the decidable fragment gives up | **done** (see `README_phase3.md`; the gadget stdlib and the Circom benchmark carry over) |
 | 4     | Own arithmetization: Plonkish/AIR lowering from the same Core IR                                                                                   | **done** (see `docs/README_phase4.md`)                                                          |
 | 5     | Own prover: FRI over Goldilocks, replacing arkworks                                                                                                | **done** (see `docs/README_phase5.md`, `docs/phase5-status.md`)                               |
-| 6     | Tooling: language server, constraint-count profiler, gadget standard library                                                                       |                                                                                                  |
-| 7     | Recursion and formal verification of the lowering                                                                                                  |                                                                                                  |
+| 6     | Tooling: language server, constraint-count profiler, gadget standard library                                                                       | **done** (see `docs/README_phase6.md`)                                        |
+| 7     | Recursion and formal verification of the lowering                                                                                                  | **in progress** (see `docs/README_phase7.md`; N.1, the executable IR spec, landed) |
 
 ## Phase 3 in detail
 
@@ -131,3 +131,24 @@ untouched" is that every frontend change is additive and regression-tested
 against the existing 90 frontend checks.
 
 See `docs/phase6.md` for the full design note.
+
+## Phase 7 in detail
+
+**Recursion and formal verification of the lowering** — the roadmap's last
+phase, in two halves. One looks *down*: the IR→R1CS/Plonkish lowering has been
+differential-tested since phase 4 (the two arithmetizations agree with each
+other) but never checked against an independent statement of what the IR
+*means*; two lowerings wrong in the same way would agree. The other looks *up*:
+a proof is currently the end of the line, and recursion makes "this proof
+verifies" something a circuit can assert, which aggregation and IVC are built on.
+
+Workstreams: **N** (formal verification of the lowering) — N.1 an executable IR
+specification that names no arithmetization, pinning spec ⟺ R1CS ⟺ Plonkish;
+N.2 per-rule faithfulness proved over the field (SMT or exhaustion) rather than
+sampled; N.3 a mutation harness proving the spec can fail. Then **O**
+(recursion) — O.1 a verifier expressed in the language and held to the
+determinacy proof; O.2 the smallest honest recursion, one proof verified inside
+another, with a tampered inner proof failing the outer. Order N → O: recursion
+leans hardest on the lowering being faithful, so verify it first.
+
+See `docs/phase7.md` for the full design note.
