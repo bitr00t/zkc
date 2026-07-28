@@ -44,7 +44,11 @@ impl Hasher<F> for ToyHash {
     }
 }
 
-const ISZERO_IR: &str = include_str!("/tmp/iszero.ir.json");
+// The IsZero circuit as the frontend emits it. Committed under tests/fixtures/
+// so `cargo test` stands alone — no GHC, no absolute paths — while
+// `scripts/fixtures.sh --check` proves the file is still byte-for-byte what
+// `zkc build examples/iszero.zkc` produces.
+const ISZERO_IR: &str = include_str!("fixtures/iszero.ir.json");
 
 fn inputs(pairs: &[(&str, &str)]) -> HashMap<String, F> {
     pairs.iter().map(|(k, v)| (k.to_string(), F::from_decimal(v).unwrap())).collect()

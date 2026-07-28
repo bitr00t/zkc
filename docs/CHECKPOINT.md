@@ -153,13 +153,20 @@ Deliberately unfinished, scoped-out work — not bugs.
   remaining hardening against a prover who commits non-polynomial columns. Does
   not affect the honest / forgery / wiring results. Tracked in
   `docs/phase5-status.md`.
-- **SMT is not runnable in the current container.** z3/cvc5 are not installed
-  here, so the SMT escalation path (phase 3B) cannot be exercised locally;
-  everything is proved via the decidable core (`--no-smt`). This is fine for the
-  whole stdlib and all phase-7 work — the `closeBits` rule means `bits` no longer
-  needs SMT — but cases genuinely outside the decidable fragment (e.g. `is_equal`
-  via `inv_or_zero`, or decompositions outside the `closeBits` pattern) still
-  require a solver and cannot be checked in this environment.
+- **SMT — no longer a boundary; the path is exercised.** Earlier checkpoints
+  recorded that no solver was installable and the phase-3B escalation could not
+  be run. That is now false: `apt-get install z3` (Ubuntu universe, z3 4.8.12)
+  works, and the escalation runs end to end in the `int` dialect —
+
+      zkc build f.zkc -o /dev/null --smt-solver z3 --smt-dialect int --smt-timeout 20
+
+  On a deliberately under-constrained gadget (`assert out * out == x`) the
+  decidable core stalls, z3 refutes, and the compiler reports the forgery it
+  built: `x = 4`, `out = 2` vs `out = -2`. So the refutation path — the half of
+  the SMT work that had never been observed working — is confirmed. The default
+  solver is still cvc5 (`QF_FF`), which is *not* packaged for Ubuntu; z3 needs
+  `--smt-dialect int` because it has no finite-field theory. Everything in the
+  stdlib and all phase-7 work continues to prove via the decidable core.
 - **Toolchain — `Cargo.lock` needs local downgrades; never commit them.** See §6.
 
 ---
@@ -224,8 +231,18 @@ cargo update -p rayon-core --precise 1.12.1
 `zkc-core` builds standalone once `zeroize` is downgraded; the arkworks chain in
 `zkc-prove` additionally needs the `rayon` downgrades.
 
-**SMT:** not installed in the current container — see §4. The project code path
-exists (z3 `QF_NIA`; cvc5 `QF_FF` syntactic-only) but cannot be run here.
+**IR fixtures.** Four backend tests compile in real frontend output. The files
+live in `backend/zkc-core/tests/fixtures/` and are **committed**, so `cargo test`
+needs no GHC and no absolute paths; `scripts/fixtures.sh --check` proves they are
+still byte-for-byte what the frontend emits (the emitter is deterministic, so the
+check is a plain `cmp`), and `scripts/fixtures.sh` regenerates them. Run the
+check after touching the frontend or any of the four `.zkc` sources. Hand-written
+IR — the per-rule specs in `lowering_faithfulness_tests`, the negative fixtures in
+`core_tests` — is deliberately *not* under the script: no source compiles to it.
+
+**SMT:** z3 is installable (`apt-get install z3`) and the escalation path runs —
+see §4 for the invocation and the confirmed refutation. cvc5, the default and the
+only one with native `QF_FF`, is still not packaged.
 
 ---
 
@@ -245,8 +262,12 @@ compiler/                        Haskell frontend (boot libraries only)
     Lsp.hs, Profile.hs           language server (K), cost profiler (L)
     Reference.hs, Field.hs, Diagnostics.hs
   tests/Spec.hs                  158 frontend checks
-  examples/*.zkc                 iszero, divide, mul_square, relation,
+examples/*.zkc                   iszero, divide, mul_square, relation,
                                  fri_verify{,_full,_fs}, index_from_challenge, ...
+                                 (repo root, not under compiler/)
+scripts/
+  run_all.sh                     end-to-end demo; checks fixtures first
+  fixtures.sh                    regenerate / --check the IR test fixtures
 std/                             gadget stdlib (each .zkc proved determinate)
   is_zero, inverse, assert_bit, assert_range4, mux,           (phase 6 M)
   fri_fold, rlc, hash_leaf, compress, fs_challenge,           (phase 7 O)
@@ -264,10 +285,12 @@ backend/
     tests/                       core, goldilocks, fft, commitment, fri, stark,
                                  poseidon, stark_poseidon, lowering_faithfulness,
                                  recursion, fri_verifier, index_binding, bits
+    tests/fixtures/*.ir.json     committed frontend output (see §6)
   zkc-prove/                     arkworks Groth16 (borrowed; being retired)
 docs/
-  ROADMAP.md, DESIGN_DECISIONS.md, README_phase0..5.md
-  phase5-status.md, phase6.md, phase7.md
+  ROADMAP.md, DESIGN_DECISIONS.md, README_phase0..7.md
+  phase5-status.md, phase6.md
+  APPLY.md                       change note for the most recent drop
   bits-hint.md                   the decomposition-hint primitive
   in-circuit-index.md            the determinate-but-unsound finding + status
   benchmarks.md, CHECKPOINT.md   (this file)

@@ -8,7 +8,7 @@
 //! near the modulus, products near `2^128`). The reference exists only in this
 //! test binary.
 
-use ark_ff::{Fp64, MontBackend, MontConfig, PrimeField, Field, Zero, One};
+use ark_ff::{Fp64, MontBackend, MontConfig, PrimeField};
 
 /// A tiny deterministic LCG — no extra dependency, reproducible on failure.
 struct Lcg(u64);
@@ -22,7 +22,7 @@ impl Lcg {
     }
 }
 
-use zkc_core::field::{TwoAdicField, ZkField};
+use zkc_core::field::ZkField;
 use zkc_core::goldilocks::{Goldilocks, MODULUS};
 
 #[derive(MontConfig)]

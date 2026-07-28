@@ -17,25 +17,7 @@ use zkc_core::witness::{solve, SolveInputs};
 
 // --- Fixtures ------------------------------------------------------------
 
-const ISZERO_IR: &str = r#"{
-  "schema_version": 2, "name": "IsZero", "field": "bn254", "const_one_wire": 0,
-  "inputs": [
-    {"wire": 1, "name": "x", "visibility": "private"},
-    {"wire": 2, "name": "out", "visibility": "output", "line": 21}],
-  "nodes": [
-    {"wire": 3, "advice_derived": true, "op": "hint", "hint": "inv_or_zero",
-     "name": "inv", "gadget": "is_zero", "line": 24, "args": [1]},
-    {"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]},
-    {"wire": 5, "advice_derived": false, "op": "const", "value": "1"},
-    {"wire": 6, "advice_derived": false, "op": "sub", "args": [5, 2]},
-    {"wire": 7, "advice_derived": false, "op": "mul", "args": [1, 2]},
-    {"wire": 8, "advice_derived": false, "op": "const", "value": "0"}],
-  "assertions": [
-    {"lhs": 4, "rhs": 6, "label": "(x * inv) == (1 - out)", "line": 26},
-    {"lhs": 7, "rhs": 8, "label": "(x * out) == 0", "line": 27}],
-  "determinacy": {"proved": true, "targets": ["out"],
-                  "branches": [["x == 0"], ["x != 0"]]}
-}"#;
+const ISZERO_IR: &str = include_str!("fixtures/iszero.ir.json");
 
 /// The same circuit with the second assertion (and its nodes) removed.
 ///
@@ -144,6 +126,24 @@ fn zero_has_no_inverse() {
 
 // --- IR validation -------------------------------------------------------
 
+/// String surgery on the committed frontend output, with a guard.
+///
+/// Several tests below check that the IR loader *rejects* something, by taking
+/// a valid IR and breaking it. A plain `str::replace` that matches nothing is
+/// silently a no-op — the test then loads unmodified, valid IR and its
+/// rejection assertion fails for a reason that looks nothing like the cause.
+/// (That is exactly what happened when these fixtures moved from hand-pasted,
+/// pretty-printed literals to real emitter output: the patterns still had the
+/// spaces the emitter does not write.) So the mutation must land, or the test
+/// says so in as many words.
+fn mutate(src: &str, from: &str, to: &str) -> String {
+    assert!(
+        src.contains(from),
+        "fixture no longer contains `{from}` — the emitter changed; update this test"
+    );
+    src.replace(from, to)
+}
+
 #[test]
 fn valid_ir_loads() {
     let ir = Ir::from_json(ISZERO_IR).unwrap();
@@ -154,7 +154,7 @@ fn valid_ir_loads() {
 
 #[test]
 fn rejects_a_future_schema_version() {
-    let text = ISZERO_IR.replace("\"schema_version\": 2", "\"schema_version\": 99");
+    let text = mutate(ISZERO_IR, "\"schema_version\":2", "\"schema_version\":99");
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("unsupported IR schema version"), "{message}");
 }
@@ -163,9 +163,10 @@ fn rejects_a_future_schema_version() {
 fn rejects_forward_references() {
     // A node that reads a wire defined later would break the solver, so the
     // topological-order invariant is checked, not assumed.
-    let text = ISZERO_IR.replace(
-        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]}"#,
-        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 7]}"#,
+    let text = mutate(
+        ISZERO_IR,
+        r#""wire":4,"advice_derived":true,"line":18,"op":"mul","args":[1,3]"#,
+        r#""wire":4,"advice_derived":true,"line":18,"op":"mul","args":[1,7]"#,
     );
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("topologically ordered"), "{message}");
@@ -173,9 +174,10 @@ fn rejects_forward_references() {
 
 #[test]
 fn rejects_wrong_arity() {
-    let text = ISZERO_IR.replace(
-        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1, 3]}"#,
-        r#"{"wire": 4, "advice_derived": true, "op": "mul", "args": [1]}"#,
+    let text = mutate(
+        ISZERO_IR,
+        r#""wire":4,"advice_derived":true,"line":18,"op":"mul","args":[1,3]"#,
+        r#""wire":4,"advice_derived":true,"line":18,"op":"mul","args":[1]"#,
     );
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("expected 2"), "{message}");
@@ -187,10 +189,10 @@ fn an_ir_claiming_outputs_without_a_proof_is_refused() {
     // and the backend treats a missing proof as a refusal rather than a
     // default-allow. Stripping the record from an otherwise valid IR must not
     // be a way to get a proving key for an under-constrained circuit.
-    let text = ISZERO_IR.replace(
-        r#""determinacy": {"proved": true, "targets": ["out"],
-                  "branches": [["x == 0"], ["x != 0"]]}"#,
-        r#""determinacy": {"proved": false, "targets": [], "branches": []}"#,
+    let text = mutate(
+        ISZERO_IR,
+        r#""determinacy":{"proved":true,"targets":["out"],"branches":[["x == 0"],["x != 0"]]}"#,
+        r#""determinacy":{"proved":false,"targets":[],"branches":[]}"#,
     );
     let message = Ir::from_json(&text).unwrap_err();
     assert!(message.contains("determinacy"), "{message}");
@@ -208,8 +210,11 @@ fn a_relation_without_outputs_needs_no_determinacy_proof() {
 
 #[test]
 fn rejects_sparse_wire_numbering() {
-    let text = ISZERO_IR.replace(r#""wire": 5, "advice_derived": false, "op": "const""#,
-                      r#""wire": 50, "advice_derived": false, "op": "const""#);
+    let text = mutate(
+        ISZERO_IR,
+        r#""wire":5,"advice_derived":false,"line":18,"op":"const""#,
+        r#""wire":50,"advice_derived":false,"line":18,"op":"const""#,
+    );
     assert!(Ir::from_json(&text).is_err());
 }
 
@@ -393,7 +398,8 @@ fn assertion_violations_report_the_source_line() {
     let ir = Ir::from_json(ISZERO_IR).unwrap();
     let (_, violated) = run(&ir, &[("x", "5"), ("out", "1")], &[]);
     assert!(
-        violated.iter().any(|origin| origin.contains("line 26")),
+        // line 18 of examples/iszero.zkc: `assert x * inv == 1 - out;`
+        violated.iter().any(|origin| origin.contains("line 18")),
         "expected the source-level origin, got {violated:?}"
     );
 }
