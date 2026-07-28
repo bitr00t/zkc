@@ -236,6 +236,19 @@ pairing-based SNARK is constant-size and tiny, and nothing FRI does will match
 waste, only a hash for its cryptography, and on a circuit this small the
 absence of a pairing setup and pairing checks makes it far quicker end to end.
 
+**What DEEP cost.** The table above predates the DEEP/FRI batch, and the
+interesting thing about that hardening is how little it moved the numbers. The
+proof grew by exactly **seven field elements — 56 bytes**: one commitment (the
+quotient, which used to go straight into FRI unbound) and the six out-of-domain
+values. The per-query openings did not grow at all, because the trace and `Z`
+were already being opened there; the rotated `Z` opening the old protocol
+carried is gone, since the rotation is handled at `ζ` now, and the quotient
+opening takes its place. Prover-side the additions are one Merkle tree over the
+quotient and one interpolation for the batch. So the last core soundness
+boundary closed for a constant, not a factor — which is the usual shape of DEEP,
+and worth recording because "we hardened it and the proof doubled" is the
+outcome people expect.
+
 Two honest caveats on the numbers. The timings are on a tiny circuit, where
 Groth16's fixed pairing costs dominate; at realistic circuit sizes the picture
 shifts (Groth16 prover time grows with the circuit, STARK proof size grows

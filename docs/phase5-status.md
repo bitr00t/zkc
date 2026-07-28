@@ -90,7 +90,10 @@ and confirms a trace putting different values in them is rejected — the case
 the gate constraint alone accepts. Wiring soundness is now enforced, not
 represented.
 
-## The one boundary left explicit
+## The one boundary left explicit — since closed
+
+*(This section is kept as written, with its resolution appended, because the
+boundary being marked rather than buried is the part worth preserving.)*
 
 FRI here proves the composite *quotient* is low-degree. The committed trace and
 `Z` columns are opened for the consistency check but not themselves folded into
@@ -99,6 +102,36 @@ hardening for full arithmetic soundness against a prover who commits
 non-polynomial columns; it does not affect the honest, forgery, or wiring
 results. It is marked here rather than buried, in the same spirit as phase 3's
 cvc5 finite-field limitation and workstream C.2's honest partial.
+
+**Closed.** The construction is DEEP: an out-of-domain point `ζ` is drawn after
+every commitment, the prover sends each column's value there, the constraint
+identity is checked *once at `ζ`* rather than pointwise on the domain, and the
+quotients `(P(x) - P(ζ))/(x - ζ)` — one per committed column — are batched with
+random challenges into the single function FRI tests. A quotient of that form is
+low-degree iff its column is a polynomial taking the claimed value at `ζ`, so one
+low-degree test now carries the trace, `Z` and the quotient alike. Each quotient
+enters the batch scaled by `λ + λ'·x^e` rather than a plain `λ`, which is what
+makes the batch test each column against *its own* degree.
+
+What that changes, concretely. The old protocol's view of the trace was the
+positions its queries happened to open — a spot check, and the positions follow
+publicly from the commitment, so a prover could grind until they missed. The
+tests in `deep_tests.rs` build exactly that prover: a column corrupted at one
+position, with an honest low-degree quotient built from the *uncorrupted*
+column, so that every Merkle opening checks out and the constraint identity
+holds everywhere the verifier looks. One test finds a position no query opens
+and watches the proof be refused anyway, by the low-degree test rather than by
+inspection; another walks every position in the domain and finds none that
+escapes. The difference between the two protocols is the difference between
+*probably caught* and *caught*.
+
+The cost is worth recording because it is so small: **seven field elements, 56
+bytes.** The trace and `Z` were already being opened at the query positions, so
+DEEP reuses those openings and adds one commitment (the quotient, which
+previously went straight into FRI unbound) plus the six out-of-domain values.
+The per-query openings did not grow at all — the rotated `Z` opening the old
+protocol carried is gone, since the rotation is handled at `ζ` now, and the
+quotient opening takes its place.
 
 ## Cost, measured
 
@@ -143,13 +176,16 @@ format.)
 Plus the wiring hardening: the permutation argument enforces the copy
 constraints, with a test that a broken wire is rejected. ✓
 
-## What is genuinely left
+## What was genuinely left
 
 - **DEEP/FRI-batch** binding the trace and `Z` to low degree — the one boundary
-  above.
+  above. **Done**; see the section above and `deep_tests.rs`.
 - **A reviewed hash** (Poseidon or Rescue over Goldilocks) swapped in for the
   stand-in `ToyHash` — a leaf change, by construction, since everything is
-  written against the `Hasher` trait.
+  written against the `Hasher` trait. **Done**; `poseidon.rs`, exercised
+  end-to-end through the STARK in `stark_poseidon_tests.rs`. `ToyHash` survives
+  only in the in-circuit verifier examples, where a trivially expressible hash
+  keeps the circuits legible.
 
-Neither is a redesign; both are the kind of finishing the roadmap's later
-phases were always meant to carry.
+Neither was a redesign; both were the kind of finishing the roadmap's later
+phases were always meant to carry, and both are now carried.

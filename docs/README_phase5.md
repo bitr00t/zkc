@@ -164,13 +164,15 @@ selectors zero) but whose two cells are wired together, and checks that a trace
 putting different values in them is **rejected** — the case the gate constraint
 alone would accept.
 
-*The one boundary left explicit:* binding the committed trace and `Z` columns
-to low degree via a FRI batch (DEEP). FRI here proves the composite quotient is
-low-degree; the trace and `Z` are committed and opened for the consistency
-check but not themselves folded into the low-degree test. This is the standard
-next hardening; it does not affect the honest, forgery, or wiring results, and
-is marked plainly in the tradition of this project's honest partials
-(Workstream C.2, the cvc5 finite-field limitation).
+*The one boundary left explicit — since closed:* binding the committed trace
+and `Z` columns to low degree via a FRI batch (DEEP). As written, FRI proved the
+composite quotient low-degree; the trace and `Z` were committed and opened for
+the consistency check but not themselves folded into the low-degree test. It was
+marked plainly here in the tradition of this project's honest partials
+(Workstream C.2, the cvc5 finite-field limitation) — and it has since been done:
+the constraint is checked at an out-of-domain point and every committed column
+enters one batched low-degree test. See `docs/phase5-status.md` and
+`deep_tests.rs`.
 
 **Order: G → H → I.** Each needs the last. G is testable in complete isolation
 (a field is a field); H needs G's FFT for nothing but is cleaner built on the

@@ -48,7 +48,7 @@ primitives.
 | 6 | Tooling: language server, profiler, gadget stdlib | **done** |
 | 7 | Recursion + formal verification of the lowering | **done** |
 
-**Test status: 127 backend tests, 166/166 frontend checks, all green, zero
+**Test status: 133 backend tests, 166/166 frontend checks, all green, zero
 warnings.**
 
 ### Phase 6 — done
@@ -156,6 +156,27 @@ the forgery) still stand. New with phase 7:
   wrap case every other obligation is met and this assertion alone refuses the
   witness. The all-ones test is a 31-multiplication product rather than an
   `is_zero`, which keeps the gadget free of advice and case splits.
+- **DEEP moves the constraint check off the domain, and that is the point.**
+  The old STARK checked `composite = Q·Z_H` pointwise at the queried positions.
+  That is a spot check of the committed columns, and the positions are a public
+  function of the commitment, so a prover can grind until they miss a corrupted
+  one. Checking the identity *once, at an out-of-domain `ζ`* drawn after every
+  commitment, and binding the claimed values back with the quotients
+  `(P(x) - P(ζ))/(x - ζ)` batched into FRI, replaces the spot check with a test
+  that every position is subject to. Measured cost: **seven field elements**
+  (one commitment, six out-of-domain values). The per-query openings did not
+  grow — the rotated `Z` opening is gone, and the quotient opening takes its
+  place.
+- **Degree correction is what makes a batch mean anything.** Each DEEP quotient
+  enters the batch scaled by `λ + λ'·x^e`, not a plain `λ`. Without it the batch
+  is bounded by the largest degree in it, and a trace column of a third that
+  degree would pass a test it should fail. The exponent per quotient is chosen
+  so the padded term lands just inside the FRI bound.
+- **One implementation of the batch, called by both sides.** `deep_batch` is
+  shared by prover and verifier. Two agreeing implementations of a random linear
+  combination is exactly the duplication that rots into a soundness bug nobody
+  can see, because each side stays self-consistent while both drift from the
+  protocol. Same reasoning for `draw_ood_point`.
 - **The hint IR is a string + optional bit index, not an enum.** The backend
   hint node carries `hint: String` + `bit: Option<u32>` (was a `HintKind` enum),
   so new hint kinds are additive and backward-compatible; the witness solver
@@ -167,13 +188,6 @@ the forgery) still stand. New with phase 7:
 
 Deliberately unfinished, scoped-out work — not bugs.
 
-- **Phase 5 — DEEP / FRI-batch (the one remaining core soundness boundary).**
-  FRI proves the composite *quotient* is low-degree; the committed trace and
-  grand-product `Z` columns are opened for the consistency check but not folded
-  into the low-degree test. Binding them (the standard DEEP step) is the
-  remaining hardening against a prover who commits non-polynomial columns. Does
-  not affect the honest / forgery / wiring results. Tracked in
-  `docs/phase5-status.md`.
 - **SMT — no longer a boundary; the path is exercised.** Earlier checkpoints
   recorded that no solver was installable and the phase-3B escalation could not
   be run. That is now false: `apt-get install z3` (Ubuntu universe, z3 4.8.12)
@@ -194,20 +208,22 @@ Deliberately unfinished, scoped-out work — not bugs.
 
 ## 5. Next steps
 
-One core unit remains:
+**No core soundness boundary is open.** The roadmap was complete before; with
+DEEP the two boundaries §4 used to carry are closed as well. What is left is
+polish, and none of it is load-bearing:
 
-1. **Finish the DEEP/FRI-batch hardening.** Fold the trace and `Z` columns into
-   the low-degree test. Well-defined, not a redesign; closes the last core
-   soundness boundary. See `docs/phase5-status.md`.
-
-Then one smaller one:
-
-2. **Generalise the index gadget beyond two bits.** `canonical_low2` returns the
+1. **Generalise the index gadget beyond two bits.** `canonical_low2` returns the
    low two bits, which covers domains of size 2 and 4 — enough for the test
    circuits, not for a real domain. The 64-bit decomposition and the canonicity
    check are already general; only the extraction is fixed at two bits.
-
-The roadmap itself is complete; all of the above is hardening or polish.
+2. **Retire `zkc-prove`.** The borrowed arkworks Groth16 path is the only reason
+   the lockfile needs local downgrades (§6). It has been superseded since phase 5
+   and is kept for the comparison benchmark; keeping it costs a recurring
+   toolchain annoyance for every contributor.
+3. **The write-up.** Blog post, GitHub Pages, the longer treatment. The project
+   is at the point where the artifacts — the determinacy finding, the
+   determinate-but-unsound index binding, the spot-check-versus-proof of DEEP —
+   are what the writing would be about.
 
 ---
 
@@ -308,10 +324,12 @@ backend/
     src/lower.rs, r1cs.rs, plonkish.rs   two lowerings + fusion + validate
     src/witness.rs               witness solver (inv, inv_or_zero, bits)
     src/fft.rs, hash.rs, poseidon.rs, merkle.rs, transcript.rs
-    src/air.rs, fri.rs, stark.rs the STARK (gate constraint + permutation)
+    src/air.rs, fri.rs, stark.rs the STARK (gate constraint + permutation,
+                                 DEEP out-of-domain check + batched FRI)
     tests/                       core, goldilocks, fft, commitment, fri, stark,
                                  poseidon, stark_poseidon, lowering_faithfulness,
-                                 recursion, fri_verifier, index_binding, bits
+                                 recursion, fri_verifier, index_binding, bits,
+                                 deep
     tests/fixtures/*.ir.json     committed frontend output (see §6)
   zkc-prove/                     arkworks Groth16 (borrowed; being retired)
 docs/
