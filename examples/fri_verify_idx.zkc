@@ -26,7 +26,7 @@ use std::compress;
 use std::mux;
 use std::fs_challenge;
 use std::fs_index_challenge;
-use std::canonical_low2;
+use std::canonical_low1;
 use std::fri_fold;
 
 circuit FriVerifyIdx {
@@ -64,7 +64,6 @@ circuit FriVerifyIdx {
     output alpha: field;      // DERIVED: the fold challenge
     output c_idx: field;      // DERIVED: the challenge the position comes from
     output i0: field;         // DERIVED: the position itself
-    output i1: field;
     output x: field;          // DERIVED: the evaluation point at that position
     output folded: field;
     output accepted: field;
@@ -94,7 +93,7 @@ circuit FriVerifyIdx {
 
     // --- Fiat-Shamir: the query position, from the full transcript ---
     (c_idx) = fs_index_challenge(seed, root, final0, final1);
-    (i0, i1) = canonical_low2(c_idx);
+    (i0) = canonical_low1(c_idx);
 
     // The openings must be at the position the transcript chose, not one the
     // prover preferred. lo sits at i0 in a four-element domain; hi at i0 + 2.

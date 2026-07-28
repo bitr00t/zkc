@@ -8,7 +8,7 @@
 //
 // It earns its place twice over, though. Because every gadget is resolved and
 // proved here together, this file is also the library's integration check: all
-// thirteen gadgets must parse, resolve, elaborate and prove determinate in a
+// sixteen gadgets must parse, resolve, elaborate and prove determinate in a
 // single scope. The frontend suite compiles it and compares the generated
 // reference against the committed one, so neither the library nor its
 // documentation can drift from the other.
@@ -27,7 +27,10 @@ use std::compress;
 use std::fs_challenge;
 use std::range8;
 use std::fs_index_challenge;
+use std::canonical_low1;
 use std::canonical_low2;
+use std::canonical_low3;
+use std::canonical_low4;
 
 circuit Reference {
     private x: field;

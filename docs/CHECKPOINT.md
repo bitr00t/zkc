@@ -48,7 +48,7 @@ primitives.
 | 6 | Tooling: language server, profiler, gadget stdlib | **done** |
 | 7 | Recursion + formal verification of the lowering | **done** |
 
-**Test status: 133 backend tests, 166/166 frontend checks, all green, zero
+**Test status: 135 backend tests, 172/172 frontend checks, all green, zero
 warnings.**
 
 ### Phase 6 — done
@@ -212,15 +212,7 @@ Deliberately unfinished, scoped-out work — not bugs.
 DEEP the two boundaries §4 used to carry are closed as well. What is left is
 polish, and none of it is load-bearing:
 
-1. **Generalise the index gadget beyond two bits.** `canonical_low2` returns the
-   low two bits, which covers domains of size 2 and 4 — enough for the test
-   circuits, not for a real domain. The 64-bit decomposition and the canonicity
-   check are already general; only the extraction is fixed at two bits.
-2. **Retire `zkc-prove`.** The borrowed arkworks Groth16 path is the only reason
-   the lockfile needs local downgrades (§6). It has been superseded since phase 5
-   and is kept for the comparison benchmark; keeping it costs a recurring
-   toolchain annoyance for every contributor.
-3. **The write-up.** Blog post, GitHub Pages, the longer treatment. The project
+1. **The write-up.** Blog post, GitHub Pages, the longer treatment. The project
    is at the point where the artifacts — the determinacy finding, the
    determinate-but-unsound index binding, the spot-check-versus-proof of DEEP —
    are what the writing would be about.
@@ -251,23 +243,32 @@ lessons worth keeping (learned the hard way):
   extension may still prompt to download the HLS build matching the active GHC —
   let it.
 
-**Backend (Rust, cargo/rustc 1.75.0).**
+**Backend (Rust).** The toolchain is pinned in `rust-toolchain.toml` to
+**1.97.1**; with `rustup` installed, that is what you get and nothing else is
+needed.
 ```
-cd backend && cargo test                   # all tests (122)
-cargo build --bin zkc-stats                # cost profiler (phase 4)
-cargo build --bin zkc-prove                # Groth16 + --arith path
+cd backend && cargo test                   # all tests (135)
+cargo build --bin zkc-stats                # arithmetization cost accounting
+cargo build --bin zkc-profile              # per-source-line cost attribution
+cargo build --bin zkc-check                # lower + self-check, --arith r1cs|plonkish
 ```
 
-**Recurring toolchain fix** (local only, do **NOT** commit — the committed
-`Cargo.lock` pins are intentional):
+**The old "recurring toolchain fix", explained and mostly gone.** Earlier
+checkpoints carried four `cargo update --precise` lines as a fix to reapply
+every session. They were never a defect in the repo — they are what an *older*
+cargo than the pinned one needs. Specifically, a distro cargo (Ubuntu 24.04
+ships 1.75.0, which is what a container without `rustup` gets) cannot parse
+`zeroize_derive 1.5.0`, because that crate is edition 2024 and 1.75 predates it.
+Retiring `zkc-prove` removed the arkworks Groth16 chain and with it the two
+`rayon` pins entirely. What is left, and only on an old cargo:
 ```
 cargo update -p zeroize --precise 1.8.1
 cargo update -p zeroize_derive --precise 1.4.2
-cargo update -p rayon --precise 1.7.0
-cargo update -p rayon-core --precise 1.12.1
 ```
-`zkc-core` builds standalone once `zeroize` is downgraded; the arkworks chain in
-`zkc-prove` additionally needs the `rayon` downgrades.
+Local only — do **not** commit them; the committed lock is correct for the
+pinned toolchain. `ark-ff`/`ark-bn254` remain (they are how the project
+instantiates BN254, which is half the "generic over the field" invariant), which
+is why `zeroize` is still in the tree at all.
 
 **IR fixtures.** Four backend tests compile in real frontend output. The files
 live in `backend/zkc-core/tests/fixtures/` and are **committed**, so `cargo test`
@@ -303,17 +304,19 @@ compiler/                        Haskell frontend (boot libraries only)
   tests/Spec.hs                  158 frontend checks
 examples/*.zkc                   iszero, divide, mul_square, relation,
                                  fri_verify{,_full,_fs,_idx},
-                                 index_from_challenge{,_sound}, ...
+                                 index_from_challenge{,_sound,16}, ...
                                  (repo root, not under compiler/)
 scripts/
-  run_all.sh                     end-to-end demo; checks fixtures first
+  run_all.sh                     end-to-end demo; checks generated artefacts first
   fixtures.sh                    regenerate / --check the IR test fixtures
+  gen_canonical.sh               regenerate / --check the canonical_low family
 std/                             gadget stdlib (each .zkc proved determinate)
   is_zero, inverse, assert_bit, assert_range4, mux,           (phase 6 M)
   fri_fold, rlc, hash_leaf, compress, fs_challenge,           (phase 7 O)
   range8                                                       (phase 7, bits)
-  canonical_low2, fs_index_challenge          (phase 7, the sound query index)
-  reference.zkc                  doc driver: uses all 13 gadgets in one scope
+  fs_index_challenge                          (phase 7, the sound query index)
+  canonical_low{1,2,3,4}         GENERATED by scripts/gen_canonical.sh
+  reference.zkc                  doc driver: uses all 16 gadgets in one scope
   tests/*_broken.zkc             a negative fixture per gadget
   REFERENCE.md                   generated by `zkc doc`, byte-checked by the
                                  frontend suite
@@ -331,7 +334,10 @@ backend/
                                  recursion, fri_verifier, index_binding, bits,
                                  deep
     tests/fixtures/*.ir.json     committed frontend output (see §6)
-  zkc-prove/                     arkworks Groth16 (borrowed; being retired)
+  zkc-tools/                     CLI tooling over the neutral IR: zkc-stats,
+                                 zkc-profile, zkc-check. No proving system —
+                                 the borrowed arkworks Groth16 backend that
+                                 used to live here is retired.
 docs/
   ROADMAP.md, DESIGN_DECISIONS.md, README_phase0..7.md
   phase5-status.md, phase6.md

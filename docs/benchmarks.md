@@ -236,6 +236,14 @@ pairing-based SNARK is constant-size and tiny, and nothing FRI does will match
 waste, only a hash for its cryptography, and on a circuit this small the
 absence of a pairing setup and pairing checks makes it far quicker end to end.
 
+**A note on reproducing the Groth16 column.** The borrowed arkworks Groth16
+backend was retired once it had been superseded for two phases; the crate that
+held it is now `zkc-tools` and does no cryptography. The numbers above stand as
+measured at phase 5 and are not re-runnable from the current tree — the code
+that produced them is in the history. What replaced it is not a smaller claim:
+the comparison's purpose was to put both systems on the table, and the STARK
+side is the one that is still developed.
+
 **What DEEP cost.** The table above predates the DEEP/FRI batch, and the
 interesting thing about that hardening is how little it moved the numbers. The
 proof grew by exactly **seven field elements — 56 bytes**: one commitment (the

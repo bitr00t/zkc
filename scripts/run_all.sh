@@ -20,7 +20,8 @@ rule() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 if [ ! -x "$ZKC" ]; then echo "building compiler..."; make -C compiler all; fi
 if [ ! -x "$PROVE" ]; then echo "building backend..."; (cd backend && cargo build --release); fi
 
-rule "0. The backend's IR fixtures still match the frontend"
+rule "0. Generated artefacts still match their generators"
+scripts/gen_canonical.sh --check || echo "(stale gadgets — run scripts/gen_canonical.sh)"
 scripts/fixtures.sh --check || echo "(stale fixtures — run scripts/fixtures.sh)"
 
 rule "1. Compile the circuits that should compile"

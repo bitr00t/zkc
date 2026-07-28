@@ -15,7 +15,7 @@
 
 use std::process::ExitCode;
 
-use zkc_prove::stats::{measure_json, Cheaper};
+use zkc_tools::stats::{measure_json, Cheaper};
 
 struct Options {
     paths: Vec<String>,

@@ -6,7 +6,7 @@
 //! Plonkish ties on multiplications) is asserted, because "neither
 //! arithmetization dominates" is the whole claim.
 
-use zkc_prove::stats::{measure_json, Cheaper};
+use zkc_tools::stats::{measure_json, Cheaper};
 
 const ISZERO_IR: &str = r##"{
   "schema_version": 2, "name": "IsZero", "field": "bn254", "const_one_wire": 0,

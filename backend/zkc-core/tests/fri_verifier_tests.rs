@@ -415,7 +415,7 @@ fn idx_query_inputs(seed_value: u64, opening_from: u64) -> (HashMap<String, F>, 
     let (final0, final1) = (inner.final_poly[0], inner.final_poly[1]);
     let alpha = sbox(seed.add(root).add(g(6)));
     let c_idx = sbox(seed.add(root).add(final0).add(final1).add(g(15)));
-    let (i0, i1) = (low_bit(c_idx, 0), low_bit(c_idx, 1));
+    let i0 = low_bit(c_idx, 0);
 
     let derived = i0 as usize;
     assert_eq!(
@@ -474,7 +474,7 @@ fn idx_query_inputs(seed_value: u64, opening_from: u64) -> (HashMap<String, F>, 
         ("hi_leaf", hi_leaf), ("hi_left0", hi_left0), ("hi_right0", hi_right0),
         ("hi_node0", hi_node0), ("hi_left1", hi_left1), ("hi_right1", hi_right1),
         ("hi_root", hi_root),
-        ("alpha", alpha), ("c_idx", c_idx), ("i0", g(i0)), ("i1", g(i1)),
+        ("alpha", alpha), ("c_idx", c_idx), ("i0", g(i0)),
         ("folded", folded), ("accepted", g(1)),
     ]
     .iter()

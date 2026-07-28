@@ -133,6 +133,9 @@ fn naive_index_binding_is_determinate_but_unsound() {
 // ---------------------------------------------------------------------------
 
 const SOUND_IR: &str = include_str!("fixtures/index_from_challenge_sound.ir.json");
+/// The same derivation at a domain of sixteen — `canonical_low4` instead of
+/// `canonical_low2`, and nothing else.
+const SOUND_IR_16: &str = include_str!("fixtures/index_from_challenge16.ir.json");
 
 /// Goldilocks: p = 2^64 - 2^32 + 1. Below 2^64, which is the whole subtlety.
 const P: u128 = 18_446_744_069_414_584_321;
@@ -158,35 +161,43 @@ fn decompositions(c: u128) -> Vec<u128> {
 /// Run the sound circuit with a prover that supplies `value`'s bits as advice
 /// and claims `idx`. Returns the obligations the result fails to meet — empty
 /// means the circuit accepted.
-fn attempt(ir: &Ir, challenge: u128, value: u128, idx: u128) -> Vec<Unmet> {
+///
+/// `bits` is how many low bits the circuit's gadget exposes — the only thing
+/// that differs between the domain-4 and domain-16 versions.
+fn attempt_with(ir: &Ir, bits: u32, challenge: u128, value: u128, idx: u128) -> Vec<Unmet> {
     let overrides: HashMap<String, F> = (0..64)
         .map(|i| (format!("b{i}"), g(((value >> i) & 1) as u64)))
         .collect();
-    let inputs: HashMap<String, F> = [
-        ("challenge", challenge),
-        ("i0", idx & 1),
-        ("i1", (idx >> 1) & 1),
-        ("idx", idx),
-    ]
-    .iter()
-    .map(|(k, v)| ((*k).to_string(), g(*v as u64)))
-    .collect();
+    let mut inputs: HashMap<String, F> = HashMap::new();
+    inputs.insert("challenge".to_string(), g(challenge as u64));
+    inputs.insert("idx".to_string(), g(idx as u64));
+    for i in 0..bits {
+        inputs.insert(format!("i{i}"), g(((idx >> i) & 1) as u64));
+    }
     let wires = solve::<F>(ir, &SolveInputs { inputs: &inputs, advice_overrides: &overrides })
         .expect("the solver computes every wire from the supplied bits");
     ir.unmet::<F>(&wires)
 }
 
+fn attempt(ir: &Ir, challenge: u128, value: u128, idx: u128) -> Vec<Unmet> {
+    attempt_with(ir, 2, challenge, value, idx)
+}
+
 /// Every (index, decomposition) pair the circuit accepts for this challenge.
-fn accepted(ir: &Ir, challenge: u128) -> Vec<(u128, u128)> {
+fn accepted_with(ir: &Ir, bits: u32, challenge: u128) -> Vec<(u128, u128)> {
     let mut ok = Vec::new();
-    for idx in 0..DOMAIN {
+    for idx in 0..(1u128 << bits) {
         for value in decompositions(challenge) {
-            if attempt(ir, challenge, value, idx).is_empty() {
+            if attempt_with(ir, bits, challenge, value, idx).is_empty() {
                 ok.push((idx, value));
             }
         }
     }
     ok
+}
+
+fn accepted(ir: &Ir, challenge: u128) -> Vec<(u128, u128)> {
+    accepted_with(ir, 2, challenge)
 }
 
 #[test]
@@ -258,6 +269,47 @@ fn the_canonicity_check_is_the_load_bearing_constraint() {
     match &unmet[0] {
         // Every bit is a bit, the reconstruction holds, the index matches the
         // bits the prover supplied. Only canonicity objects.
+        Unmet::Assertion { label, .. } => assert_eq!(label, "(ones30 * lo) == 0"),
+        other => panic!("expected the canonicity assertion, got {other:?}"),
+    }
+}
+
+
+#[test]
+fn the_derivation_widens_to_a_larger_domain() {
+    // `canonical_low<k>` is generated for k = 1..4 (scripts/gen_canonical.sh),
+    // and everything above its last k assertions is width-independent — the
+    // same 64-bit decomposition, the same canonicity check. So the property
+    // worth re-testing at a wider domain is the one the width touches: that the
+    // index really is the k low bits, and that no other index survives.
+    //
+    // Sixteen candidate indices now, still walked against every 64-bit string
+    // congruent to the challenge.
+    let ir = Ir::from_json(SOUND_IR_16).unwrap();
+    let domain = 16u128;
+
+    for c in [0x0123_4567_89ab_cdefu128, 7, 4_294_967_294, P - 1, 0] {
+        assert_eq!(
+            accepted_with(&ir, 4, c),
+            vec![(c % domain, c)],
+            "challenge {c}: expected only the honest index at domain {domain}"
+        );
+    }
+}
+
+#[test]
+fn the_canonicity_check_still_bites_at_the_wider_domain() {
+    // The wraparound does not go away when the domain grows — p is 1 mod any
+    // power of two up to 2^32, so the wrapped string shifts the index by one at
+    // every width. Same sharpest case, same single obligation refusing it.
+    let ir = Ir::from_json(SOUND_IR_16).unwrap();
+    let c = 4_294_967_294u128; // 2^32 - 2
+    let wrapped = c + P; // = 2^64 - 1
+    assert_ne!(wrapped % 16, c % 16, "the wrapped string must move the index");
+
+    let unmet = attempt_with(&ir, 4, c, wrapped, wrapped % 16);
+    assert_eq!(unmet.len(), 1, "exactly one obligation should refuse this witness, got {unmet:?}");
+    match &unmet[0] {
         Unmet::Assertion { label, .. } => assert_eq!(label, "(ones30 * lo) == 0"),
         other => panic!("expected the canonicity assertion, got {other:?}"),
     }

@@ -1,40 +1,41 @@
-//! `zkc-prove` — the backend CLI.
+//! `zkc-check` — lower an IR and check the witness against it.
 //!
 //! ```text
-//! zkc-prove --ir build/iszero.ir.json --inputs inputs/iszero_honest.json
+//! zkc-check --ir build/iszero.ir.json --inputs inputs/iszero_honest.json
 //!           [--arith r1cs|plonkish]
 //! ```
 //!
 //! Pipeline: load IR → solve the witness → lower to the chosen arithmetization
-//! → **check it ourselves** → (R1CS only) Groth16 setup, prove, verify.
+//! → **check it ourselves**.
 //!
-//! `--arith plonkish` lowers, validates and self-checks the Plonkish circuit
-//! but stops before proving: there is no Plonkish prover here — that is
-//! phase 5 — so it goes exactly as far as R1CS did in phase 0, a checked
-//! arithmetization without cryptography. What travels unchanged either way is
-//! the frontend's determinacy record: soundness is a property of the IR, not
-//! of how it is arithmetized, and this is the path that demonstrates it.
+//! This was `zkc-prove`, and the last step used to be Groth16 setup / prove /
+//! verify against a borrowed arkworks backend. Phase 5 wrote a prover of our
+//! own, and the borrowed one has been superseded since; retiring it leaves the
+//! part of this binary that was never about cryptography in the first place.
+//! To prove a circuit, lower it and hand it to `zkc-core`'s STARK.
 //!
-//! The self-check before proving is not redundant. A violated constraint gets
-//! reported with the assertion's original source text and line number, which
-//! is the kind of error a compiler owes its users; without it the same
-//! failure surfaces as an assertion deep inside the proving library.
+//! What the tool is *for* is unchanged, and it is the phase-4 claim: a circuit
+//! can be built either way, and the frontend's determinacy record is the same
+//! on both paths, because soundness is a property of the IR and not of how it
+//! is arithmetized. `--arith plonkish` lowers, validates and self-checks the
+//! Plonkish circuit; `--arith r1cs` does the same for R1CS. Both print the same
+//! determinacy line.
+//!
+//! The self-check is not redundant. A violated constraint gets reported with
+//! the assertion's original source text and line number, which is the kind of
+//! error a compiler owes its users; without it the same failure surfaces as an
+//! assertion deep inside a proving library.
 
 use std::collections::HashMap;
 use std::process::ExitCode;
 
-use ark_bn254::{Bn254, Fr};
-use ark_groth16::Groth16;
-use ark_snark::SNARK;
-use ark_std::rand::rngs::StdRng;
-use ark_std::rand::SeedableRng;
+use ark_bn254::Fr;
 
 use zkc_core::field::ZkField;
 use zkc_core::ir::Ir;
 use zkc_core::lower::lower;
 use zkc_core::plonkish::lower_plonkish;
 use zkc_core::witness::{solve, SolveInputs};
-use zkc_prove::LoweredCircuit;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Arith {
@@ -151,7 +152,7 @@ fn run() -> Result<ExitCode, String> {
 
     // 2. Choose the arithmetization.
     match options.arith {
-        Arith::R1cs => prove_r1cs(&ir, &wire_values, options.verbose),
+        Arith::R1cs => check_r1cs(&ir, &wire_values, options.verbose),
         Arith::Plonkish => build_plonkish(&ir, &wire_values, options.verbose),
     }
 }
@@ -171,8 +172,8 @@ fn report_determinacy(ir: &Ir) {
     }
 }
 
-/// The R1CS path: lower, self-check, then Groth16 setup / prove / verify.
-fn prove_r1cs(ir: &Ir, wire_values: &[Fr], verbose: bool) -> Result<ExitCode, String> {
+/// The R1CS path: lower, then self-check the witness against the constraints.
+fn check_r1cs(ir: &Ir, wire_values: &[Fr], verbose: bool) -> Result<ExitCode, String> {
     let r1cs = lower::<Fr>(ir)?;
     let assignment = r1cs.assignment(wire_values);
 
@@ -205,23 +206,11 @@ fn prove_r1cs(ir: &Ir, wire_values: &[Fr], verbose: bool) -> Result<ExitCode, St
     }
     println!("self-check: all {} constraints satisfied", r1cs.constraints.len());
 
-    let mut rng = StdRng::seed_from_u64(42);
-    let (proving_key, verifying_key) =
-        Groth16::<Bn254>::circuit_specific_setup(LoweredCircuit::shape(r1cs.clone()), &mut rng)
-            .map_err(|e| format!("setup failed: {e}"))?;
+    let public_inputs: Vec<String> =
+        r1cs.public_vars.iter().map(|var| assignment[*var].to_decimal()).collect();
+    println!("public inputs: [{}]", public_inputs.join(", "));
 
-    let circuit = LoweredCircuit::assigned(r1cs, assignment);
-    let public_inputs = circuit.public_inputs();
-    let proof =
-        Groth16::<Bn254>::prove(&proving_key, circuit, &mut rng).map_err(|e| format!("proving failed: {e}"))?;
-    let accepted = Groth16::<Bn254>::verify(&verifying_key, &public_inputs, &proof)
-        .map_err(|e| format!("verification failed: {e}"))?;
-
-    let shown: Vec<String> = public_inputs.iter().map(|v| v.to_decimal()).collect();
-    println!("public inputs: [{}]", shown.join(", "));
-    println!("verifier accepts: {accepted}");
-
-    Ok(if accepted { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The Plonkish path: lower, validate the lowering, self-check the witness —

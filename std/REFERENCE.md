@@ -100,10 +100,34 @@ Generated from determinacy summaries: each entry states what the compiler proved
 - outputs: c
 - determined: directly, with no case split
 
+## canonical_low1
+
+    canonical_low1(v) -> (i0)
+
+- inputs: v
+- outputs: i0
+- determined: directly, with no case split
+
 ## canonical_low2
 
     canonical_low2(v) -> (i0, i1)
 
 - inputs: v
 - outputs: i0, i1
+- determined: directly, with no case split
+
+## canonical_low3
+
+    canonical_low3(v) -> (i0, i1, i2)
+
+- inputs: v
+- outputs: i0, i1, i2
+- determined: directly, with no case split
+
+## canonical_low4
+
+    canonical_low4(v) -> (i0, i1, i2, i3)
+
+- inputs: v
+- outputs: i0, i1, i2, i3
 - determined: directly, with no case split

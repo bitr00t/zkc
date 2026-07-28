@@ -32,6 +32,7 @@ SOURCES=(
   "iszero:examples/iszero.zkc:"
   "index_from_challenge:examples/index_from_challenge.zkc:"
   "index_from_challenge_sound:examples/index_from_challenge_sound.zkc:--field goldilocks"
+  "index_from_challenge16:examples/index_from_challenge16.zkc:--field goldilocks"
   "fri_verify_full:examples/fri_verify_full.zkc:"
   "fri_verify_fs:examples/fri_verify_fs.zkc:"
   "fri_verify_idx:examples/fri_verify_idx.zkc:--field goldilocks"

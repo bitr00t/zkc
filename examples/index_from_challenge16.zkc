@@ -1,0 +1,23 @@
+// The sound index derivation at a wider domain (phase 7, O).
+//
+// examples/index_from_challenge_sound.zkc does this for a domain of four; this
+// one does it for sixteen, and the only difference is which gadget of the
+// canonical_low family it calls. That is the point of the file: the 64-bit
+// decomposition and the canonicity check are the same for every domain size,
+// so widening the index is a change of `use` and nothing else. See
+// scripts/gen_canonical.sh, which is where the width actually lives.
+//
+// Compile with --field goldilocks.
+use std::canonical_low4;
+
+circuit IndexFromChallenge16 {
+    private challenge: field;
+    output i0: field;
+    output i1: field;
+    output i2: field;
+    output i3: field;
+    output idx: field;
+
+    (i0, i1, i2, i3) = canonical_low4(challenge);
+    assert idx == i0 + 2 * i1 + 4 * i2 + 8 * i3;
+}

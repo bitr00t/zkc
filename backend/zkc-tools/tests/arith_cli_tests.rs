@@ -1,6 +1,6 @@
 //! End-to-end tests for the `--arith` path (phase 4, Workstream F.2).
 //!
-//! These drive the built `zkc-prove` binary the way a user does: on an IR file
+//! These drive the built `zkc-check` binary the way a user does: on an IR file
 //! and an inputs file, with each arithmetization. The claim under test is the
 //! one F.2 exists to make good — a circuit can be *built* either way, and the
 //! determinacy record is the same on both paths because soundness lives in the
@@ -10,7 +10,7 @@ use std::io::Write;
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_zkc-prove")
+    env!("CARGO_BIN_EXE_zkc-check")
 }
 
 /// Write text to a uniquely named temp file and return its path.
@@ -47,7 +47,7 @@ fn run(ir: &std::path::Path, inputs: &std::path::Path, arith: &str) -> (bool, St
     let output = Command::new(bin())
         .args(["--ir", ir.to_str().unwrap(), "--inputs", inputs.to_str().unwrap(), "--arith", arith])
         .output()
-        .expect("failed to run zkc-prove");
+        .expect("failed to run zkc-check");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -63,7 +63,11 @@ fn r1cs_path_proves_the_honest_witness() {
     let (ok, text) = run(&ir, &inputs, "r1cs");
     assert!(ok, "honest R1CS run failed: {text}");
     assert!(text.contains("arithmetization: R1CS"));
-    assert!(text.contains("verifier accepts: true"), "{text}");
+    // The Groth16 step this line used to assert on is retired; what the R1CS
+    // path claims now is that it lowered and self-checked, which is the claim
+    // this test was ever really about.
+    assert!(text.contains("self-check: all"), "{text}");
+    assert!(text.contains("public inputs: ["), "{text}");
 }
 
 #[test]
@@ -76,7 +80,7 @@ fn plonkish_path_builds_and_self_checks_but_does_not_prove() {
     assert!(text.contains("gate(s) and"), "should self-check gates and copies: {text}");
     // Honest about the boundary: lowered and checked, not proved.
     assert!(text.contains("no Plonkish prover yet"), "{text}");
-    assert!(!text.contains("verifier accepts"), "Plonkish must not claim a proof: {text}");
+    assert!(!text.contains("verifier accepts"), "no path here claims a proof: {text}");
 }
 
 #[test]

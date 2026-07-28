@@ -13,7 +13,7 @@
 
 use std::process::ExitCode;
 
-use zkc_prove::stats::profile_json;
+use zkc_tools::stats::profile_json;
 
 struct Options {
     paths: Vec<String>,

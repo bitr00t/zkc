@@ -1,0 +1,26 @@
+[package]
+name = "zkc-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line tooling over the neutral IR: cost accounting, per-line profiling, and a lower-and-self-check driver. No proving system."
+
+[[bin]]
+name = "zkc-check"
+path = "src/bin/zkc-check.rs"
+
+[[bin]]
+name = "zkc-stats"
+path = "src/bin/zkc-stats.rs"
+
+[[bin]]
+name = "zkc-profile"
+path = "src/bin/zkc-profile.rs"
+
+[dependencies]
+zkc-core = { path = "../zkc-core" }
+# BN254 as a field, nothing more. The borrowed Groth16 backend that used to
+# live here (ark-groth16, ark-relations, ark-snark, ark-std) was retired once
+# phase 5's own prover replaced it.
+ark-bn254 = "0.4"
+ark-ff = "0.4"
+serde_json = "1.0"

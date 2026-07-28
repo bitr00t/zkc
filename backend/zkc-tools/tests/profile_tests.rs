@@ -7,7 +7,7 @@
 //! the same measurement, not a second one. The other test pins the attribution
 //! itself: a multiplication on a known line is billed to that line.
 
-use zkc_prove::stats::{measure_json, profile_json};
+use zkc_tools::stats::{measure_json, profile_json};
 
 /// A circuit whose multiplication is on line 5 and is *not* fused (it feeds an
 /// `add`, not an assertion directly), so it keeps its own constraint/row and
