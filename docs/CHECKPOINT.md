@@ -338,6 +338,8 @@ backend/
                                  zkc-profile, zkc-check. No proving system —
                                  the borrowed arkworks Groth16 backend that
                                  used to live here is retired.
+README.md                        the project README (root); the phase-7 plan
+                                 that used to sit there is docs/README_phase7_plan.md
 docs/
   ROADMAP.md, DESIGN_DECISIONS.md, README_phase0..7.md
   phase5-status.md, phase6.md
