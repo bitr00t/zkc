@@ -1,0 +1,115 @@
+// An in-circuit FRI verifier whose QUERY POSITION is derived too (phase 7, O).
+//
+// The arc, in three files. fri_verify_full.zkc Merkle-verifies the openings,
+// folds them and checks the final codeword — but trusts the fold challenge.
+// fri_verify_fs.zkc derives the fold challenge in-circuit, so the prover cannot
+// choose it after committing; it still trusts the query position, and a prover
+// who picks where it is opened is a prover who is not being tested. This file
+// removes that last piece of trust.
+//
+// The index is drawn from the transcript after the final codeword is absorbed
+// (std/fs_index_challenge.zkc) and reduced to a position by reading the low
+// bits of its canonical representative (std/canonical_low2.zkc). That reduction
+// is the part that took a phase to get right: the natural binding proves
+// determinate and is forgeable, so the position is instead read off a pinned
+// 64-bit decomposition, with the non-canonical decompositions Goldilocks admits
+// explicitly refused. See docs/in-circuit-index.md.
+//
+// Everything the position touches is then bound to it: the Merkle path bits of
+// both openings (the domain has four elements, so lo sits at index i0 and hi at
+// i0 + 2), and the evaluation point x, which is the coset shift times the
+// domain generator raised to the position — a mux, since i0 is a bit.
+//
+// Compile with --field goldilocks.
+use std::hash_leaf;
+use std::compress;
+use std::mux;
+use std::fs_challenge;
+use std::fs_index_challenge;
+use std::canonical_low2;
+use std::fri_fold;
+
+circuit FriVerifyIdx {
+    private lo: field;
+    private hi: field;
+    private lo_sib0: field;
+    private lo_sib1: field;
+    private lo_bit0: field;
+    private lo_bit1: field;
+    private hi_sib0: field;
+    private hi_sib1: field;
+    private hi_bit0: field;
+    private hi_bit1: field;
+    private root: field;
+    private seed: field;      // the transcript's domain separator
+    private x0: field;        // the coset shift: the domain point at position 0
+    private x1: field;        // shift * generator: the domain point at position 1
+    private final0: field;
+    private final1: field;
+
+    output lo_leaf: field;
+    output lo_left0: field;
+    output lo_right0: field;
+    output lo_node0: field;
+    output lo_left1: field;
+    output lo_right1: field;
+    output lo_root: field;
+    output hi_leaf: field;
+    output hi_left0: field;
+    output hi_right0: field;
+    output hi_node0: field;
+    output hi_left1: field;
+    output hi_right1: field;
+    output hi_root: field;
+    output alpha: field;      // DERIVED: the fold challenge
+    output c_idx: field;      // DERIVED: the challenge the position comes from
+    output i0: field;         // DERIVED: the position itself
+    output i1: field;
+    output x: field;          // DERIVED: the evaluation point at that position
+    output folded: field;
+    output accepted: field;
+
+    // --- Merkle-verify lo against the root ---
+    (lo_leaf) = hash_leaf(lo);
+    (lo_left0)  = mux(lo_bit0, lo_sib0, lo_leaf);
+    (lo_right0) = mux(lo_bit0, lo_leaf, lo_sib0);
+    (lo_node0)  = compress(lo_left0, lo_right0);
+    (lo_left1)  = mux(lo_bit1, lo_sib1, lo_node0);
+    (lo_right1) = mux(lo_bit1, lo_node0, lo_sib1);
+    (lo_root)   = compress(lo_left1, lo_right1);
+    assert lo_root == root;
+
+    // --- Merkle-verify hi against the root ---
+    (hi_leaf) = hash_leaf(hi);
+    (hi_left0)  = mux(hi_bit0, hi_sib0, hi_leaf);
+    (hi_right0) = mux(hi_bit0, hi_leaf, hi_sib0);
+    (hi_node0)  = compress(hi_left0, hi_right0);
+    (hi_left1)  = mux(hi_bit1, hi_sib1, hi_node0);
+    (hi_right1) = mux(hi_bit1, hi_node0, hi_sib1);
+    (hi_root)   = compress(hi_left1, hi_right1);
+    assert hi_root == root;
+
+    // --- Fiat-Shamir: the fold challenge, from the commitment ---
+    (alpha) = fs_challenge(seed, root);
+
+    // --- Fiat-Shamir: the query position, from the full transcript ---
+    (c_idx) = fs_index_challenge(seed, root, final0, final1);
+    (i0, i1) = canonical_low2(c_idx);
+
+    // The openings must be at the position the transcript chose, not one the
+    // prover preferred. lo sits at i0 in a four-element domain; hi at i0 + 2.
+    assert lo_bit0 == i0;
+    assert lo_bit1 == 0;
+    assert hi_bit0 == i0;
+    assert hi_bit1 == 1;
+
+    // The evaluation point follows the position: x = shift * generator^i0.
+    (x) = mux(i0, x1, x0);
+
+    // --- Fold with the derived challenge, and check the final codeword ---
+    (folded) = fri_fold(lo, hi, alpha, x);
+    assert folded == final0;
+    assert final0 == final1;
+
+    assert accepted == 1;
+}

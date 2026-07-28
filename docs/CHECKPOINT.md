@@ -48,7 +48,7 @@ primitives.
 | 6 | Tooling: language server, profiler, gadget stdlib | **done** |
 | 7 | Recursion + formal verification of the lowering | **done** |
 
-**Test status: 122 backend tests, 158/158 frontend checks, all green, zero
+**Test status: 127 backend tests, 164/164 frontend checks, all green, zero
 warnings.**
 
 ### Phase 6 — done
@@ -86,6 +86,17 @@ warnings.**
 - **The `bits` decomposition hint** — a new language primitive (see §3 and
   `docs/bits-hint.md`), which unlocked general range checks (`std/range8.zkc`)
   that the language could not previously express.
+- **The sound query index — the finding closed.** `std/canonical_low2.zkc`
+  reads the index off a pinned 64-bit decomposition instead of relating it to
+  the challenge, and refuses the non-canonical decompositions Goldilocks admits.
+  Proved by enumeration over the prover's entire freedom
+  (`index_binding_tests.rs`), determinate with no case split and no SMT.
+- **A verifier that trusts nothing about its query** —
+  `examples/fri_verify_idx.zkc` derives the query position from the transcript
+  and binds the Merkle path bits and the evaluation point to it. The test that
+  matters hands it a *genuine* opening of the *genuine* root at a position the
+  transcript did not choose — an attack every earlier verifier here accepted —
+  and shows the path assertions passing while the position binding refuses it.
 
 ### Real hash (a resolved phase-5 boundary)
 A real **Poseidon** over Goldilocks now exists (`backend/zkc-core/src/poseidon.rs`)
@@ -103,7 +114,8 @@ Plonkish over trace-AIR; free variables are atoms; gate constraint alone catches
 the forgery) still stand. New with phase 7:
 
 - **The in-circuit index binding is determinate but *unsound* — a finding, not a
-  feature.** The natural binding `challenge == index + domain*high` (index bits
+  feature.** *(Since closed — see the two entries after this one; the finding is
+  kept because it is the reason the rest exists.)* The natural binding `challenge == index + domain*high` (index bits
   constrained) *proves determinate* — `idx` is a function of the inputs — yet is
   forgeable: `high` is free, so the prover hits any index via
   `high = (challenge - index)/domain`. The lesson: **determinacy rules out
@@ -126,6 +138,24 @@ the forgery) still stand. New with phase 7:
   `bits`-based range checks practical without SMT. (Limitation: the pre-pass
   marks bits from sources determined *before* the search; a source determined
   only mid-search is a false negative, never unsound.)
+- **The sound index reads the position off, rather than relating it to the
+  challenge.** Given `bits`, the natural fix — range-check `high` in
+  `challenge == index + domain*high` — is not the one to make. Decomposing the
+  challenge into all 64 bits and taking the index from the bottom of the
+  decomposition is simpler *and* strictly stronger: the reconstruction leaves no
+  freedom at all, and the range bound on the upper bits comes for free because
+  they are themselves a `bits` decomposition. Determinacy proves it as a
+  marking, with no case split and no SMT.
+- **Canonicity is one constraint, and it is load-bearing.** Goldilocks wraps at
+  `p = 2^64 - 2^32 + 1`, *below* `2^64`, so a 64-bit string is not a unique
+  representative: for any canonical `c < 2^32 - 1` the string for `c + p` also
+  reconstructs, with different low bits. The non-canonical strings are exactly
+  those with all top 32 bits set and a nonzero low half, so
+  `(all top bits set) * (low 32 bits) == 0` refuses all of them and no canonical
+  one. The test proves it is load-bearing rather than defensive: on the sharpest
+  wrap case every other obligation is met and this assertion alone refuses the
+  witness. The all-ones test is a 31-multiplication product rather than an
+  `is_zero`, which keeps the gadget free of advice and case splits.
 - **The hint IR is a string + optional bit index, not an enum.** The backend
   hint node carries `hint: String` + `bit: Option<u32>` (was a `HintKind` enum),
   so new hint kinds are additive and backward-compatible; the witness solver
@@ -137,15 +167,12 @@ the forgery) still stand. New with phase 7:
 
 Deliberately unfinished, scoped-out work — not bugs.
 
-- **The sound in-circuit query index — the loop left open.** `bits` now makes
-  the needed range check on `high` expressible and provably determinate. What
-  remains for a *fully* sound field-index derivation is (a) range-checking `high`
-  to `[0, 2^62)` via `bits`, (b) the canonical check `challenge < p` (a
-  `bits`-based comparison against the modulus, needed because the field wraps at
-  `p ≈ 2^64` so a second decomposition of `challenge + p` can exist for small
-  challenges), and (c) wiring the whole derivation into the verifier so the
-  forgery in `index_binding_tests.rs` becomes a *rejection*. No missing primitive
-  now blocks this. See `docs/in-circuit-index.md`.
+- **`std/REFERENCE.md` is stale.** It documents 5 of the 13 stdlib gadgets; the
+  phase-7 additions were never added. It is described as generated from
+  determinacy summaries, but there is no CLI entry point that regenerates it —
+  `renderReference` is reachable only from the test suite. Either wire it to a
+  `zkc reference` subcommand and regenerate, or stop calling it generated. Small,
+  and worth doing before anything is written up publicly.
 - **Phase 5 — DEEP / FRI-batch (the one remaining core soundness boundary).**
   FRI proves the composite *quotient* is low-degree; the committed trace and
   grand-product `Z` columns are opened for the consistency check but not folded
@@ -173,19 +200,22 @@ Deliberately unfinished, scoped-out work — not bugs.
 
 ## 5. Next steps
 
-Two well-defined units, either order:
+One core unit remains:
 
-1. **Close the in-circuit index loop (builds directly on `bits`).** Range-check
-   `high` and add the canonical `challenge < p` comparison, then re-point
-   `index_binding_tests.rs`: the forged index that currently *satisfies* the
-   naive binding should now be *rejected*, and the honest index accepted. This
-   turns the phase-7 finding into a solved problem and completes a genuinely
-   self-contained in-circuit verifier.
-2. **Finish the DEEP/FRI-batch hardening.** Fold the trace and `Z` columns into
+1. **Finish the DEEP/FRI-batch hardening.** Fold the trace and `Z` columns into
    the low-degree test. Well-defined, not a redesign; closes the last core
-   soundness boundary.
+   soundness boundary. See `docs/phase5-status.md`.
 
-Both are hardening rather than new scope — the roadmap itself is complete.
+Then two smaller ones, either order:
+
+2. **Regenerate `std/REFERENCE.md`** and give it a CLI entry point, so the claim
+   that it is generated is true (see §4).
+3. **Generalise the index gadget beyond two bits.** `canonical_low2` returns the
+   low two bits, which covers domains of size 2 and 4 — enough for the test
+   circuits, not for a real domain. The 64-bit decomposition and the canonicity
+   check are already general; only the extraction is fixed at two bits.
+
+The roadmap itself is complete; all of the above is hardening or polish.
 
 ---
 
@@ -263,7 +293,8 @@ compiler/                        Haskell frontend (boot libraries only)
     Reference.hs, Field.hs, Diagnostics.hs
   tests/Spec.hs                  158 frontend checks
 examples/*.zkc                   iszero, divide, mul_square, relation,
-                                 fri_verify{,_full,_fs}, index_from_challenge, ...
+                                 fri_verify{,_full,_fs,_idx},
+                                 index_from_challenge{,_sound}, ...
                                  (repo root, not under compiler/)
 scripts/
   run_all.sh                     end-to-end demo; checks fixtures first
@@ -272,6 +303,7 @@ std/                             gadget stdlib (each .zkc proved determinate)
   is_zero, inverse, assert_bit, assert_range4, mux,           (phase 6 M)
   fri_fold, rlc, hash_leaf, compress, fs_challenge,           (phase 7 O)
   range8                                                       (phase 7, bits)
+  canonical_low2, fs_index_challenge          (phase 7, the sound query index)
   tests/*_broken.zkc             a negative fixture per gadget
   REFERENCE.md
 backend/
@@ -292,7 +324,8 @@ docs/
   phase5-status.md, phase6.md
   APPLY.md                       change note for the most recent drop
   bits-hint.md                   the decomposition-hint primitive
-  in-circuit-index.md            the determinate-but-unsound finding + status
+  in-circuit-index.md            the determinate-but-unsound finding, and how
+                                 it was closed
   benchmarks.md, CHECKPOINT.md   (this file)
 ```
 

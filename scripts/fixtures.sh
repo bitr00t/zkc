@@ -27,12 +27,14 @@ cd "$(dirname "$0")/.."
 ZKC=compiler/build/zkc
 DEST=backend/zkc-core/tests/fixtures
 
-# fixture name  <-  source
+# fixture name  <-  source  [<- extra zkc flags]
 SOURCES=(
-  "iszero:examples/iszero.zkc"
-  "index_from_challenge:examples/index_from_challenge.zkc"
-  "fri_verify_full:examples/fri_verify_full.zkc"
-  "fri_verify_fs:examples/fri_verify_fs.zkc"
+  "iszero:examples/iszero.zkc:"
+  "index_from_challenge:examples/index_from_challenge.zkc:"
+  "index_from_challenge_sound:examples/index_from_challenge_sound.zkc:--field goldilocks"
+  "fri_verify_full:examples/fri_verify_full.zkc:"
+  "fri_verify_fs:examples/fri_verify_fs.zkc:"
+  "fri_verify_idx:examples/fri_verify_idx.zkc:--field goldilocks"
 )
 
 check=0
@@ -50,10 +52,13 @@ trap 'rm -rf "$tmp"' EXIT
 drift=0
 for entry in "${SOURCES[@]}"; do
   name="${entry%%:*}"
-  src="${entry#*:}"
+  rest="${entry#*:}"
+  src="${rest%%:*}"
+  flags="${rest#*:}"
   out="$DEST/$name.ir.json"
 
-  if ! "$ZKC" build "$src" -o "$tmp/$name.ir.json" 2>/dev/null; then
+  # shellcheck disable=SC2086 -- flags is a deliberate word-split list
+  if ! "$ZKC" build "$src" -o "$tmp/$name.ir.json" $flags 2>/dev/null; then
     echo "FAIL  $src did not compile"
     exit 1
   fi

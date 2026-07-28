@@ -1,0 +1,6 @@
+// BROKEN: c is never constrained — the prover could choose the challenge the
+// query position is derived from, which is the whole point of deriving it.
+gadget fs_index_challenge(seed: field, root: field, final0: field, final1: field) -> (c: field) {
+    let a = seed + root + final0 + final1 + 15;
+    let a2 = a * a;
+}

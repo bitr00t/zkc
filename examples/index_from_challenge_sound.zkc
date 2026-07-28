@@ -1,0 +1,29 @@
+// The sound counterpart to examples/index_from_challenge.zkc (phase 7, O).
+//
+// That file is the cautionary one: the natural binding
+// `challenge == index + 4*high` is PROVED determinate and is nevertheless
+// forgeable, because `high` is unconstrained. It was written to make the
+// boundary of the determinacy type system concrete — determinacy rules out
+// under-constrained outputs, but does not certify that an output is a
+// canonical reduction, which is a range property.
+//
+// This file closes that loop. The index is no longer *related* to the
+// challenge, it is *read off* a pinned 64-bit decomposition of it, and the
+// non-canonical decompositions Goldilocks admits are ruled out explicitly.
+// See std/canonical_low2.zkc for the argument, docs/in-circuit-index.md for
+// the history, and index_binding_tests.rs for the proof by enumeration that
+// exactly one index now satisfies the circuit.
+//
+// Compile with --field goldilocks: the canonicity check is arithmetic about
+// p = 2^64 - 2^32 + 1 and means nothing over any other field.
+use std::canonical_low2;
+
+circuit IndexFromChallengeSound {
+    private challenge: field;
+    output i0: field;
+    output i1: field;
+    output idx: field;
+
+    (i0, i1) = canonical_low2(challenge);
+    assert idx == i0 + 2 * i1;
+}

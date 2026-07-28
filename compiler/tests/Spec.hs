@@ -37,7 +37,7 @@ main = do
   hSetEncoding stdout utf8
   setLocaleEncoding utf8
   stdResults <- stdGadgetCases
-  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase, friVerifyFullCase, friVerifyFsCase, indexBindingCase]
+  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase, friVerifyFullCase, friVerifyFsCase, indexBindingCase, soundIndexCase, friVerifyIdxCase]
   let allCases = cases ++ stdResults ++ m2Results
   results <- mapM runCase allCases
   let failures = length (filter not results)
@@ -51,28 +51,34 @@ main = do
 -- files read here are the ones actually shipped, so the test validates the
 -- artifacts rather than a copy of them. Paths are relative to @compiler/@, the
 -- directory the suite is run from.
-gadgetChecks :: [(String, String)]  -- ^ (file base name, wrapper circuit)
+gadgetChecks :: [(String, String, String)]  -- ^ (file base name, field, wrapper circuit)
 gadgetChecks =
-  [ ("is_zero",    "circuit T { private x: field; output o: field; (o) = is_zero(x); }")
-  , ("inverse",    "circuit T { private x: field; output o: field; let (r) = inverse(x); assert o == r; }")
-  , ("assert_bit", "circuit T { private b: field; output o: field; (o) = assert_bit(b); }")
-  , ("mux",        "circuit T { private s: field; private a: field; private b: field; output o: field; (o) = mux(s, a, b); }")
-  , ("assert_range4","circuit T { private x: field; output o: field; (o) = assert_range4(x); }")
-  , ("fri_fold",   "circuit T { private p: field; private m: field; private beta: field; private x: field; output o: field; (o) = fri_fold(p, m, beta, x); }")
-  , ("rlc",        "circuit T { private a: field; private b: field; private r: field; output o: field; (o) = rlc(a, b, r); }")
-  , ("hash_leaf",  "circuit T { private v: field; output o: field; (o) = hash_leaf(v); }")
-  , ("compress",   "circuit T { private l: field; private r: field; output o: field; (o) = compress(l, r); }")
-  , ("fs_challenge","circuit T { private seed: field; private root: field; output o: field; (o) = fs_challenge(seed, root); }")
-  , ("range8",     "circuit T { private x: field; output o: field; (o) = range8(x); }")
+  [ ("is_zero",    "bn254", "circuit T { private x: field; output o: field; (o) = is_zero(x); }")
+  , ("inverse",    "bn254", "circuit T { private x: field; output o: field; let (r) = inverse(x); assert o == r; }")
+  , ("assert_bit", "bn254", "circuit T { private b: field; output o: field; (o) = assert_bit(b); }")
+  , ("mux",        "bn254", "circuit T { private s: field; private a: field; private b: field; output o: field; (o) = mux(s, a, b); }")
+  , ("assert_range4","bn254", "circuit T { private x: field; output o: field; (o) = assert_range4(x); }")
+  , ("fri_fold",   "bn254", "circuit T { private p: field; private m: field; private beta: field; private x: field; output o: field; (o) = fri_fold(p, m, beta, x); }")
+  , ("rlc",        "bn254", "circuit T { private a: field; private b: field; private r: field; output o: field; (o) = rlc(a, b, r); }")
+  , ("hash_leaf",  "bn254", "circuit T { private v: field; output o: field; (o) = hash_leaf(v); }")
+  , ("compress",   "bn254", "circuit T { private l: field; private r: field; output o: field; (o) = compress(l, r); }")
+  , ("fs_challenge","bn254", "circuit T { private seed: field; private root: field; output o: field; (o) = fs_challenge(seed, root); }")
+  , ("range8",     "bn254", "circuit T { private x: field; output o: field; (o) = range8(x); }")
+    -- Goldilocks: these two are arithmetic about p = 2^64 - 2^32 + 1 and are
+    -- checked in the field they are meant for, not merely in some field.
+  , ("fs_index_challenge", "goldilocks",
+     "circuit T { private seed: field; private root: field; private f0: field; private f1: field; output o: field; (o) = fs_index_challenge(seed, root, f0, f1); }")
+  , ("canonical_low2", "goldilocks",
+     "circuit T { private v: field; output a: field; output b: field; (a, b) = canonical_low2(v); }")
   ]
 
 stdGadgetCases :: IO [(String, Bool)]
 stdGadgetCases = concat <$> mapM one gadgetChecks
   where
-    one (base, wrapper) = do
+    one (base, field, wrapper) = do
       good   <- readFileMaybe ("../std/" ++ base ++ ".zkc")
       broken <- readFileMaybe ("../std/tests/" ++ base ++ "_broken.zkc")
-      let proves src = null (diagnoseSource "bn254" (src ++ "\n" ++ wrapper))
+      let proves src = null (diagnoseSource field (src ++ "\n" ++ wrapper))
       pure
         [ ( "std: " ++ base ++ " is proved determinate"
           , maybe False proves good )
@@ -205,6 +211,46 @@ indexBindingCase = do
              Nothing -> False
   pure ("verifier: the naive index binding is proved determinate (though unsound — see backend)", ok)
 
+-- | O: the loop closed. The sound index derivation reads the position off a
+-- pinned 64-bit decomposition instead of relating it to the challenge, so the
+-- forgery the naive binding admits has nowhere to live. Determinacy proves it
+-- with no case split and no SMT — `closeBits` marks the bits determined once
+-- their source is, which is what makes a 64-bit decomposition practical.
+soundIndexCase :: IO (String, Bool)
+soundIndexCase = do
+  circuit <- readFileMaybe "../examples/index_from_challenge_sound.zkc"
+  libs    <- mapM readFileMaybe [ "../std/canonical_low2.zkc" ]
+  let gadgetLists = mapM (>>= eitherToMaybe . parseGadgets) libs
+      ok = case (circuit >>= eitherToMaybe . parseProgram, gadgetLists) of
+             (Just prog, Just gls) ->
+               let merged = prog { progGadgets = concat gls ++ progGadgets prog }
+               in case elaborate "goldilocks" merged of
+                    Right e -> either (const False) (const True)
+                      (checkProgram goldilocks (elabGadgetBodies e) (elabCircuitBody e))
+                    Left _ -> False
+             _ -> False
+  pure ("verifier: the SOUND index derivation is proved determinate (64-bit, no SMT)", ok)
+
+-- | O: the verifier with nothing left on trust — fold challenge, query
+-- position, path bits and evaluation point all derived from the transcript.
+friVerifyIdxCase :: IO (String, Bool)
+friVerifyIdxCase = do
+  circuit <- readFileMaybe "../examples/fri_verify_idx.zkc"
+  libs    <- mapM readFileMaybe
+               [ "../std/hash_leaf.zkc", "../std/compress.zkc", "../std/mux.zkc"
+               , "../std/fs_challenge.zkc", "../std/fs_index_challenge.zkc"
+               , "../std/canonical_low2.zkc", "../std/fri_fold.zkc" ]
+  let gadgetLists = mapM (>>= eitherToMaybe . parseGadgets) libs
+      ok = case (circuit >>= eitherToMaybe . parseProgram, gadgetLists) of
+             (Just prog, Just gls) ->
+               let merged = prog { progGadgets = concat gls ++ progGadgets prog }
+               in case elaborate "goldilocks" merged of
+                    Right e -> either (const False) (const True)
+                      (checkProgram goldilocks (elabGadgetBodies e) (elabCircuitBody e))
+                    Left _ -> False
+             _ -> False
+  pure ("verifier: the derived-position verifier is proved determinate", ok)
+
 -- | O.1: the verifier check is held to the determinacy discipline — its
 -- generated reference shows `folded` determined by a case split on x and the
 -- gadget guaranteeing x != 0 (its advice quarantined by the inverse).
@@ -233,6 +279,11 @@ runCase (name, ok) = do
 
 bn254 :: Integer
 bn254 = maybe (error "bn254 must be a known field") id (fieldModulus "bn254")
+
+-- | The STARK field. The sound index derivation is arithmetic about
+-- p = 2^64 - 2^32 + 1 and is only meaningful here.
+goldilocks :: Integer
+goldilocks = maybe (error "goldilocks must be a known field") id (fieldModulus "goldilocks")
 
 elab :: String -> Either Diagnostic Elaborated
 elab source = parseProgram source >>= elaborate "bn254"

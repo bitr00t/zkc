@@ -1,0 +1,94 @@
+// canonical_low2(v) -> (i0, i1): the two low bits of v's canonical
+// representative, extracted soundly (phase 7, O — this closes the finding in
+// docs/in-circuit-index.md).
+//
+// The use is the FRI query index: for a domain of size 2 the index is i0, for
+// size 4 it is i0 + 2*i1. Deriving it in-circuit is what stops a prover from
+// opening a position of its choosing.
+//
+// Why this is not a two-line gadget. The natural binding
+// `v == index + 4*high` proves determinate and is forgeable: `high` is free,
+// so the prover reaches any index it likes. The index being the LOW BITS of v
+// is a range property, and range properties are what determinacy does not see
+// (examples/index_from_challenge.zkc is the cautionary version). So pin the
+// range instead of asserting the relation: decompose v into all 64 of its
+// bits. The reconstruction `v == sum b_i 2^i` leaves the prover no freedom —
+// the bits ARE the representative — and the index is read off rather than
+// related.
+//
+// One wrinkle is specific to Goldilocks, and it is why the gadget is long.
+// The field wraps at p = 2^64 - 2^32 + 1, which is BELOW 2^64, so a 64-bit
+// string is not a unique representative: whenever the canonical value c is
+// less than 2^32 - 1, the string for c + p is also 64 bits wide and also
+// satisfies the reconstruction. Its low bits differ from c's, so a prover
+// could shift the query index for roughly one challenge in 2^32. Rare is not
+// sound.
+//
+// The non-canonical strings are exactly those in [p, 2^64), and because
+// p = 2^64 - 2^32 + 1 that interval has a clean description: the top 32 bits
+// are all set AND the low 32 bits are not all zero. Hence the check
+//
+//     (all top bits set) * (low 32 bits) == 0
+//
+// which refuses every non-canonical string and no canonical one — including
+// p - 1 = 2^64 - 2^32, whose top bits are all set and whose low half is zero.
+// The all-ones test is a product of the 32 top bits: 31 multiplications, no
+// advice and no case split, so the gadget stays inside the decidable core and
+// needs no SMT. (An is_zero on 2^32-1 - hi would cost three constraints
+// instead of 31, at the price of a case split and an inverse hint; the
+// product needs nothing the bits have not already given us.)
+//
+// Bind with:  (i0, i1) = canonical_low2(v);
+// Goldilocks only — compile with --field goldilocks. The canonicity check is
+// arithmetic about p and means nothing over another field.
+gadget canonical_low2(v: field) -> (i0: field, i1: field) {
+    advice (b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15, b16, b17, b18, b19, b20, b21, b22, b23, b24, b25, b26, b27, b28, b29, b30, b31, b32, b33, b34, b35, b36, b37, b38, b39, b40, b41, b42, b43, b44, b45, b46, b47, b48, b49, b50, b51, b52, b53, b54, b55, b56, b57, b58, b59, b60, b61, b62, b63) = bits(v);
+
+    // The low 32 bits as a value: zero exactly when the string's low half is.
+    let lo0 = b0 + 2 * b1 + 4 * b2 + 8 * b3 + 16 * b4 + 32 * b5 + 64 * b6 + 128 * b7;
+    let lo1 = 256 * b8 + 512 * b9 + 1024 * b10 + 2048 * b11 + 4096 * b12 + 8192 * b13 + 16384 * b14 + 32768 * b15;
+    let lo2 = 65536 * b16 + 131072 * b17 + 262144 * b18 + 524288 * b19 + 1048576 * b20 + 2097152 * b21 + 4194304 * b22 + 8388608 * b23;
+    let lo3 = 16777216 * b24 + 33554432 * b25 + 67108864 * b26 + 134217728 * b27 + 268435456 * b28 + 536870912 * b29 + 1073741824 * b30 + 2147483648 * b31;
+    let lo = lo0 + lo1 + lo2 + lo3;
+
+    // ones30 == 1 exactly when every one of the top 32 bits is set.
+    let ones0 = b32 * b33;
+    let ones1 = ones0 * b34;
+    let ones2 = ones1 * b35;
+    let ones3 = ones2 * b36;
+    let ones4 = ones3 * b37;
+    let ones5 = ones4 * b38;
+    let ones6 = ones5 * b39;
+    let ones7 = ones6 * b40;
+    let ones8 = ones7 * b41;
+    let ones9 = ones8 * b42;
+    let ones10 = ones9 * b43;
+    let ones11 = ones10 * b44;
+    let ones12 = ones11 * b45;
+    let ones13 = ones12 * b46;
+    let ones14 = ones13 * b47;
+    let ones15 = ones14 * b48;
+    let ones16 = ones15 * b49;
+    let ones17 = ones16 * b50;
+    let ones18 = ones17 * b51;
+    let ones19 = ones18 * b52;
+    let ones20 = ones19 * b53;
+    let ones21 = ones20 * b54;
+    let ones22 = ones21 * b55;
+    let ones23 = ones22 * b56;
+    let ones24 = ones23 * b57;
+    let ones25 = ones24 * b58;
+    let ones26 = ones25 * b59;
+    let ones27 = ones26 * b60;
+    let ones28 = ones27 * b61;
+    let ones29 = ones28 * b62;
+    let ones30 = ones29 * b63;
+
+    // Canonicity: a string with all top bits set may only be p - 1's, whose
+    // low half is zero. Every other non-canonical string dies here.
+    assert ones30 * lo == 0;
+
+    // The two low bits, read off the pinned decomposition.
+    assert i0 == b0;
+    assert i1 == b1;
+}

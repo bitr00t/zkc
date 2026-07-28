@@ -1,0 +1,12 @@
+// BROKEN: i0 is constrained to be a bit, but never tied to v's decomposition —
+// so both values of it satisfy every constraint and the prover picks the query
+// position it prefers. This is the shape of the real bug the sound gadget
+// exists to avoid; determinacy rejects it because the output is not a function
+// of the input. (The subtler failure — a binding that IS determinate and still
+// unsound — is examples/index_from_challenge.zkc, which no determinacy check
+// can catch.)
+gadget canonical_low2(v: field) -> (i0: field, i1: field) {
+    advice (b0, b1) = bits(v);
+    assert i0 * (1 - i0) == 0;
+    assert i1 == b1;
+}

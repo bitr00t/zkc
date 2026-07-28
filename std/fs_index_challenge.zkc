@@ -1,0 +1,20 @@
+// fs_index_challenge(seed, root, final0, final1) -> (c): the transcript
+// challenge the FRI query index is drawn from, derived in-circuit (phase 7, O).
+//
+// fs_challenge derives the *fold* challenge, drawn right after the layer
+// commitment. The query index is drawn later — after the final codeword has
+// also been absorbed — so its challenge is a hash of the whole history:
+// [seed, root, final0, final1] with the squeeze counter 0 appended. For the
+// circuit-friendly hash (sbox(x) = x^7, position offsets 1..5) that is
+// sbox(seed + root + final0 + final1 + 15), the offsets summing to 15.
+//
+// Reducing this challenge to a position is the other half, and the half with
+// teeth: see std/canonical_low2.zkc. Bind with:
+//     (c) = fs_index_challenge(seed, root, final0, final1);
+gadget fs_index_challenge(seed: field, root: field, final0: field, final1: field) -> (c: field) {
+    let a = seed + root + final0 + final1 + 15;
+    let a2 = a * a;
+    let a4 = a2 * a2;
+    let a6 = a4 * a2;
+    assert c == a6 * a;
+}

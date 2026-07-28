@@ -14,7 +14,7 @@ use zkc_core::field::{TwoAdicField, ZkField};
 use zkc_core::fri::{coset_shift, prove as fri_prove, verify as fri_verify, FriConfig};
 use zkc_core::goldilocks::Goldilocks;
 use zkc_core::hash::{Digest, Hasher};
-use zkc_core::ir::Ir;
+use zkc_core::ir::{Ir, Unmet};
 use zkc_core::plonkish::lower_plonkish;
 use zkc_core::stark::{prove as stark_prove, verify as stark_verify};
 use zkc_core::transcript::Transcript;
@@ -354,5 +354,203 @@ fn a_challenge_not_bound_to_the_commitment_is_rejected() {
     assert!(
         !vcircuit.is_satisfied(&vcircuit.assignment(&wires)),
         "a challenge not derived from the commitment must be rejected"
+    );
+}
+
+// --- The query position, derived in-circuit ----------------------------------
+//
+// The verifier above derives its fold challenge but still trusts the *position*
+// it is asked to check — and a prover that chooses where it is opened is a
+// prover that is not being tested. This closes that.
+//
+// The position is drawn from the transcript after the final codeword is
+// absorbed, so its challenge is sbox(seed + root + final0 + final1 + 15), and
+// reduced to a domain position by reading the low bits of its canonical
+// representative — the reduction that took a phase to get right, because the
+// natural binding proves determinate and is forgeable. See
+// std/canonical_low2.zkc and docs/in-circuit-index.md.
+
+const VERIFIER_IDX_IR: &str = include_str!("fixtures/fri_verify_idx.ir.json");
+
+/// The low bit of a field element's canonical representative.
+fn low_bit(value: F, bit: u32) -> u64 {
+    let canonical: u128 = value.to_decimal().parse().unwrap();
+    ((canonical >> bit) & 1) as u64
+}
+
+/// Build a witness for examples/fri_verify_idx.zkc.
+///
+/// `seed_value` fixes the transcript, and with it the fold challenge, the final
+/// codeword, and the position the circuit will derive. `opening_from` chooses
+/// whose layer-0 opening is actually presented.
+///
+/// Passing the same value twice is the honest prover. Passing a different one
+/// models the attack this circuit exists to refuse: a prover that commits
+/// honestly and then opens somewhere else. The swap is not a tampered path — the
+/// layer-0 Merkle tree is built from the input codeword alone and so does not
+/// depend on the seed, which means the substituted opening is a *genuine*
+/// opening of the *same* root. Nothing in the previous verifier would have
+/// noticed.
+///
+/// Returns the witness, the position the transcript chose, and the position the
+/// presented opening actually sits at.
+fn idx_query_inputs(seed_value: u64, opening_from: u64) -> (HashMap<String, F>, usize, usize) {
+    let degree_bound = 2usize;
+    let config = FriConfig { blowup: 2, num_queries: 1 };
+    let coeffs: Vec<F> = vec![g(7), g(3)];
+
+    let seed = g(seed_value);
+    let mut prover_t = Transcript::<_, CircuitHash>::new(&[seed]);
+    let inner = fri_prove(&coeffs, degree_bound, &config, &mut prover_t);
+
+    let mut other_t = Transcript::<_, CircuitHash>::new(&[g(opening_from)]);
+    let other = fri_prove(&coeffs, degree_bound, &config, &mut other_t);
+
+    let root = inner.roots[0].0[0];
+    assert_eq!(
+        root, other.roots[0].0[0],
+        "the layer-0 tree must not depend on the seed, or the swap below proves nothing"
+    );
+
+    let (final0, final1) = (inner.final_poly[0], inner.final_poly[1]);
+    let alpha = sbox(seed.add(root).add(g(6)));
+    let c_idx = sbox(seed.add(root).add(final0).add(final1).add(g(15)));
+    let (i0, i1) = (low_bit(c_idx, 0), low_bit(c_idx, 1));
+
+    let derived = i0 as usize;
+    assert_eq!(
+        derived, inner.queries[0].index,
+        "the in-circuit index derivation must match the transcript exactly"
+    );
+
+    // x = shift * generator^position; the position is a bit, so a mux suffices.
+    let gen = F::two_adic_generator(inner.domain_size.trailing_zeros());
+    let x0 = coset_shift::<F>();
+    let x1 = x0.mul(gen);
+    let x = if derived == 1 { x1 } else { x0 };
+
+    let layer = &other.queries[0].layers[0];
+    let bit = |idx: usize, level: u32| g(((idx >> level) & 1) as u64);
+    let sib = |op: &zkc_core::merkle::Opening<F>, level: usize| op.siblings[level].0[0];
+    let hash_leaf = |v: F| sbox(v.add(g(1)));
+    let compress = |l: F, r: F| sbox(l.add(g(2))).add(sbox(r.add(g(3))));
+    let mux = |sel: F, a: F, b: F| if sel == g(1) { a } else { b };
+    let fold = |p: F, m: F, beta: F, xx: F| {
+        xx.add(xx).inverse().unwrap().mul(xx.mul(p.add(m)).add(beta.mul(p.sub(m))))
+    };
+
+    let (lo, hi) = (layer.lo, layer.hi);
+    let (lb0, lb1) = (bit(layer.lo_proof.index, 0), bit(layer.lo_proof.index, 1));
+    let (ls0, ls1) = (sib(&layer.lo_proof, 0), sib(&layer.lo_proof, 1));
+    let (hb0, hb1) = (bit(layer.hi_proof.index, 0), bit(layer.hi_proof.index, 1));
+    let (hs0, hs1) = (sib(&layer.hi_proof, 0), sib(&layer.hi_proof, 1));
+
+    let lo_leaf = hash_leaf(lo);
+    let lo_left0 = mux(lb0, ls0, lo_leaf);
+    let lo_right0 = mux(lb0, lo_leaf, ls0);
+    let lo_node0 = compress(lo_left0, lo_right0);
+    let lo_left1 = mux(lb1, ls1, lo_node0);
+    let lo_right1 = mux(lb1, lo_node0, ls1);
+    let lo_root = compress(lo_left1, lo_right1);
+    let hi_leaf = hash_leaf(hi);
+    let hi_left0 = mux(hb0, hs0, hi_leaf);
+    let hi_right0 = mux(hb0, hi_leaf, hs0);
+    let hi_node0 = compress(hi_left0, hi_right0);
+    let hi_left1 = mux(hb1, hs1, hi_node0);
+    let hi_right1 = mux(hb1, hi_node0, hs1);
+    let hi_root = compress(hi_left1, hi_right1);
+    let folded = fold(lo, hi, alpha, x);
+
+    let inputs: HashMap<String, F> = [
+        ("lo", lo), ("hi", hi),
+        ("lo_sib0", ls0), ("lo_sib1", ls1), ("lo_bit0", lb0), ("lo_bit1", lb1),
+        ("hi_sib0", hs0), ("hi_sib1", hs1), ("hi_bit0", hb0), ("hi_bit1", hb1),
+        ("root", root), ("seed", seed),
+        ("x0", x0), ("x1", x1), ("x", x),
+        ("final0", final0), ("final1", final1),
+        ("lo_leaf", lo_leaf), ("lo_left0", lo_left0), ("lo_right0", lo_right0),
+        ("lo_node0", lo_node0), ("lo_left1", lo_left1), ("lo_right1", lo_right1),
+        ("lo_root", lo_root),
+        ("hi_leaf", hi_leaf), ("hi_left0", hi_left0), ("hi_right0", hi_right0),
+        ("hi_node0", hi_node0), ("hi_left1", hi_left1), ("hi_right1", hi_right1),
+        ("hi_root", hi_root),
+        ("alpha", alpha), ("c_idx", c_idx), ("i0", g(i0)), ("i1", g(i1)),
+        ("folded", folded), ("accepted", g(1)),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_string(), *v))
+    .collect();
+
+    (inputs, derived, other.queries[0].index)
+}
+
+fn idx_wires(inputs: &HashMap<String, F>) -> (Ir, Vec<F>) {
+    let ir = Ir::from_json(VERIFIER_IDX_IR).unwrap();
+    let wires = solve::<F>(
+        &ir,
+        &SolveInputs { inputs, advice_overrides: &HashMap::new() },
+    )
+    .unwrap();
+    (ir, wires)
+}
+
+#[test]
+fn the_query_position_is_derived_in_circuit_and_the_verifier_proves() {
+    // Nothing about the query is taken on trust any more: the fold challenge,
+    // the position, the Merkle path bits and the evaluation point are all
+    // functions of the transcript, and the whole verification proves as an
+    // outer STARK.
+    let (inputs, derived, opened) = idx_query_inputs(1, 1);
+    assert_eq!(derived, opened);
+
+    let (ir, wires) = idx_wires(&inputs);
+    assert!(ir.is_satisfied::<F>(&wires), "the honest witness must satisfy the verifier");
+
+    let circuit = lower_plonkish::<F>(&ir).unwrap();
+    assert!(circuit.is_satisfied(&circuit.assignment(&wires)));
+
+    let config = FriConfig::default();
+    let proof = stark_prove::<F, CircuitHash>(&circuit, &wires, &config);
+    assert!(
+        stark_verify::<F, CircuitHash>(&circuit, &proof, &config).is_ok(),
+        "the derived-position verifier did not prove"
+    );
+}
+
+#[test]
+fn an_opening_at_a_position_the_transcript_did_not_choose_is_refused() {
+    // The attack the previous verifier could not see. The prover presents a
+    // genuine opening of the genuine root — just at the position it preferred
+    // rather than the one the transcript drew.
+    let (inputs, derived, opened) = idx_query_inputs(1, 2);
+    assert_ne!(derived, opened, "the two seeds must draw different positions");
+
+    let (ir, wires) = idx_wires(&inputs);
+    let unmet = ir.unmet::<F>(&wires);
+    let labels: Vec<String> = unmet
+        .iter()
+        .filter_map(|u| match u {
+            Unmet::Assertion { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // The authentication paths still check out — this is a real opening of the
+    // real tree, which is precisely why a verifier that checks only the path
+    // would have accepted it.
+    assert!(!labels.iter().any(|l| l == "lo_root == root"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "hi_root == root"), "{labels:?}");
+
+    // The position binding is what refuses it.
+    assert!(labels.iter().any(|l| l == "lo_bit0 == i0"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "hi_bit0 == i0"), "{labels:?}");
+
+    // And it cannot be forced through the outer proof either.
+    let circuit = lower_plonkish::<F>(&ir).unwrap();
+    let config = FriConfig::default();
+    let forced = stark_prove::<F, CircuitHash>(&circuit, &wires, &config);
+    assert!(
+        stark_verify::<F, CircuitHash>(&circuit, &forced, &config).is_err(),
+        "an outer proof over a misplaced opening must not verify"
     );
 }
