@@ -37,7 +37,7 @@ main = do
   hSetEncoding stdout utf8
   setLocaleEncoding utf8
   stdResults <- stdGadgetCases
-  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase, friVerifyFullCase, friVerifyFsCase, indexBindingCase, soundIndexCase, friVerifyIdxCase]
+  m2Results <- sequence [includeCase, docCase, friVerifyCase, friReferenceCase, friVerifyFullCase, friVerifyFsCase, indexBindingCase, soundIndexCase, friVerifyIdxCase, referenceDocCase, referenceFieldCase]
   let allCases = cases ++ stdResults ++ m2Results
   results <- mapM runCase allCases
   let failures = length (filter not results)
@@ -210,6 +210,60 @@ indexBindingCase = do
                Left _ -> False
              Nothing -> False
   pure ("verifier: the naive index binding is proved determinate (though unsound — see backend)", ok)
+
+-- | M.2: the generated reference is generated. `zkc doc` renders one section
+-- per gadget from its determinacy summary, and `std/reference.zkc` is the
+-- program that puts the whole library in one scope so the whole library can be
+-- summarised at once. This check regenerates the document and compares it to
+-- the committed `std/REFERENCE.md` byte for byte — the same discipline
+-- `scripts/fixtures.sh --check` applies to the IR fixtures, and the reason the
+-- module can claim its output cannot fall out of step with the code.
+--
+-- Compiling the driver also proves all thirteen gadgets resolve, elaborate and
+-- prove determinate together in a single scope, which no per-gadget check does.
+referenceGadgets :: [String]  -- ^ in the order std/reference.zkc uses them
+referenceGadgets =
+  [ "is_zero", "inverse", "assert_bit", "mux", "assert_range4", "fri_fold"
+  , "rlc", "hash_leaf", "compress", "fs_challenge", "range8"
+  , "fs_index_challenge", "canonical_low2" ]
+
+renderStdReference :: String -> Integer -> IO (Maybe String)
+renderStdReference field modulus = do
+  driver <- readFileMaybe "../std/reference.zkc"
+  libs   <- mapM (\g -> readFileMaybe ("../std/" ++ g ++ ".zkc")) referenceGadgets
+  let gadgetLists = mapM (>>= eitherToMaybe . parseGadgets) libs
+  pure $ case (driver >>= eitherToMaybe . parseProgram, gadgetLists) of
+    (Just prog, Just gls) ->
+      let merged = prog { progGadgets = concat gls ++ progGadgets prog }
+      in case elaborate field merged of
+           Right e -> case gadgetSummaries modulus (elabGadgetBodies e) of
+             Right summaries -> Just (renderReference summaries)
+             Left _ -> Nothing
+           Left _ -> Nothing
+    _ -> Nothing
+
+referenceDocCase :: IO (String, Bool)
+referenceDocCase = do
+  generated <- renderStdReference "goldilocks" goldilocks
+  committed <- readFileMaybe "../std/REFERENCE.md"
+  let ok = case (generated, committed) of
+             (Just g, Just c) -> g == c
+             _ -> False
+  pure ("std: REFERENCE.md is exactly what `zkc doc` generates", ok)
+
+-- | The reference is committed once, for one field, so it had better not
+-- depend on which. It does not: the summaries record signatures, case splits
+-- and nonzero facts, and none of those differ between bn254 and Goldilocks for
+-- these gadgets. Checking it here means the committed document stays a claim
+-- about the library rather than about a field.
+referenceFieldCase :: IO (String, Bool)
+referenceFieldCase = do
+  overGoldilocks <- renderStdReference "goldilocks" goldilocks
+  overBn254      <- renderStdReference "bn254" bn254
+  let ok = case (overGoldilocks, overBn254) of
+             (Just a, Just b) -> a == b
+             _ -> False
+  pure ("std: the generated reference does not depend on the field", ok)
 
 -- | O: the loop closed. The sound index derivation reads the position off a
 -- pinned 64-bit decomposition instead of relating it to the challenge, so the

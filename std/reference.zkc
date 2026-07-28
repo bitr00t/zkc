@@ -1,0 +1,37 @@
+// The documentation driver for the standard library.
+//
+// `zkc doc` summarises every gadget in scope, and a scope is a program — so
+// generating the reference for the whole library needs one program that pulls
+// the whole library in. That is all this file is:
+//
+//     zkc doc std/reference.zkc --field goldilocks -o std/REFERENCE.md
+//
+// It earns its place twice over, though. Because every gadget is resolved and
+// proved here together, this file is also the library's integration check: all
+// thirteen gadgets must parse, resolve, elaborate and prove determinate in a
+// single scope. The frontend suite compiles it and compares the generated
+// reference against the committed one, so neither the library nor its
+// documentation can drift from the other.
+//
+// The circuit below is a placeholder. `zkc doc` reports on the gadgets, not on
+// it, but a program must have exactly one circuit.
+use std::is_zero;
+use std::inverse;
+use std::assert_bit;
+use std::mux;
+use std::assert_range4;
+use std::fri_fold;
+use std::rlc;
+use std::hash_leaf;
+use std::compress;
+use std::fs_challenge;
+use std::range8;
+use std::fs_index_challenge;
+use std::canonical_low2;
+
+circuit Reference {
+    private x: field;
+    output o: field;
+
+    assert o == x;
+}
